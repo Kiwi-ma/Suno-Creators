@@ -58,7 +58,7 @@ EXPECTED_COLUMNS = {
         'Instrumentation_Principale', 'Ambiance_Sonore_Specifique', 'Effets_Production_Domination',
         'Type_Voix_Desiree', 'Style_Vocal_Desire', 'Caractere_Voix_Desire',
         'URL_Audio_Local', 'URL_Cover_Album', 'URL_Video_Clip_Associe', 'Mots_Cles_SEO',
-        'Description_Courte_Marketing', 'Favori' # **Ω CORRECTION**: Ajout de la colonne 'Favori'.
+        'Description_Courte_Marketing', 'Favori' # Ajout de la colonne Favori
     ],
     WORKSHEET_NAMES["ALBUMS_PLANETAIRES"]: [
         'ID_Album', 'Nom_Album', 'Date_Sortie_Prevue', 'Statut_Album',

@@ -2359,7 +2359,7 @@ if st.session_state['current_page'] == 'Timeline Événements':
 
 
 # --- Page : Historique de l'Oracle (Logging) ---
-if st.session_state['current_page'] == 'Historique de l'Oracle':
+if st.session_state['current_page'] == "Historique de l'Oracle":
     st.header("📚 Historique de l'Oracle")
     st.write("Consultez l'historique de toutes vos interactions avec l'Oracle Architecte et évaluez ses générations.")
 

@@ -1,1390 +1,2405 @@
-# app.py (Mise à jour)
+# app.py
+
 import streamlit as st
 import os
-from datetime import datetime, timedelta
 import pandas as pd
-import altair as alt
-import random
-import gspread # Nécessaire ici pour gspread.utils.rowcol_to_a1 dans la gestion des styles
+from datetime import datetime
+import base64
 
+# Importation de nos modules personnalisés
+from config import (
+    SHEET_NAME, WORKSHEET_NAMES, ASSETS_DIR, AUDIO_CLIPS_DIR, SONG_COVERS_DIR, ALBUM_COVERS_DIR, GENERATED_TEXTS_DIR
+)
+import sheets_connector as sc
+import gemini_oracle as go
+import utils as ut
 
-# Importe les modules que nous avons créés
-import config
-import sheets_connector
-import gemini_oracle
-import utils
-
-# --- Initialisation de st.session_state pour les paramètres de redirection et la directive ---
-if 'generated_narrative_params' not in st.session_state:
-    st.session_state.generated_narrative_params = None
-if 'redirect_to_page' not in st.session_state:
-    st.session_state.redirect_to_page = None
-if 'last_directive_text' not in st.session_state:
-    st.session_state.last_directive_text = ""
-if 'current_universe_id_for_edit' not in st.session_state:
-    st.session_state.current_universe_id_for_edit = None
-if 'extracted_plot_for_universe' not in st.session_state:
-    st.session_state.extracted_plot_for_universe = ""
-if 'extracted_characters_for_universe' not in st.session_state:
-    st.session_state.extracted_characters_for_universe = ""
-if 'current_style_id_for_edit' not in st.session_state: # Initialisation de la variable de session pour l'édition de style
-    st.session_state.current_style_id_for_edit = None
-# Ajout pour la confirmation de suppression
-if 'confirm_delete_id' not in st.session_state:
-    st.session_state.confirm_delete_id = None
-if 'confirm_delete_type' not in st.session_state:
-    st.session_state.confirm_delete_type = None
-
-# --- Gestion des redirections après initialisation de la session ---
-if st.session_state.redirect_to_page:
-    page_to_redirect_to = st.session_state.redirect_to_page
-    st.session_state.redirect_to_page = None
-    st.query_params["page"] = page_to_redirect_to.replace(" ", "%20")
-    st.rerun()
-
-# --- Fonctions de confirmation personnalisées (remplacement de alert/confirm) ---
-# Ces fonctions manipulent st.session_state pour afficher/masquer un message de confirmation
-def show_confirm_modal(item_id, item_type):
-    st.session_state.confirm_delete_id = item_id
-    st.session_state.confirm_delete_type = item_type
-    st.rerun() # Trigger a rerun to show the modal
-
-def hide_confirm_modal():
-    st.session_state.confirm_delete_id = None
-    st.session_state.confirm_delete_type = None
-    st.rerun() # Trigger a rerun to hide the modal
-
-def perform_delete(item_id, item_type):
-    if item_type == "oeuvre":
-        if sheets_connector.delete_row_by_id(config.WORKSHEET_NAME_OEUVRES, 'ID_Oeuvre', item_id):
-            # Optional: delete local text file
-            df_oeuvres = sheets_connector.load_data_from_sheet(config.WORKSHEET_NAME_OEUVRES) # Reload to find URL
-            oeuvre_row = df_oeuvres[df_oeuvres['ID_Oeuvre'] == item_id]
-            if not oeuvre_row.empty and oeuvre_row.iloc[0].get('URL_Texte_Local'):
-                local_text_path = os.path.join(os.path.dirname(__file__), oeuvre_row.iloc[0]['URL_Texte_Local'])
-                if os.path.exists(local_text_path):
-                    try:
-                        os.remove(local_text_path)
-                        st.success(f"Fichier local de l'œuvre {item_id} supprimé.")
-                    except Exception as e:
-                        st.error(f"Erreur lors de la suppression du fichier local de l'œuvre {item_id}: {e}")
-            sheets_connector.load_data_from_sheet.clear()
-            st.success(f"L'œuvre '{item_id}' a été supprimée avec succès.")
-            hide_confirm_modal() # Hide modal and rerun
-        else:
-            st.error(f"Échec de la suppression de l'œuvre '{item_id}'.")
-    elif item_type == "universe":
-        if sheets_connector.delete_row_by_id(config.WORKSHEET_NAME_UNIVERS, 'ID_Univers', item_id):
-            sheets_connector.load_data_from_sheet.clear()
-            st.success(f"L'univers '{item_id}' a été supprimé avec succès.")
-            hide_confirm_modal()
-        else:
-            st.error(f"Échec de la suppression de l'univers '{item_id}'.")
-    elif item_type == "style":
-        if sheets_connector.delete_row_by_id(config.WORKSHEET_NAME_STYLES, 'ID_Style', item_id):
-            sheets_connector.load_data_from_sheet.clear()
-            st.success(f"Le style '{item_id}' a été supprimé avec succès.")
-            hide_confirm_modal()
-        else:
-            st.error(f"Échec de la suppression du style '{item_id}'.")
-    else:
-        st.error("Type d'élément à supprimer inconnu.")
-
-# --- Affichage du modal de confirmation ---
-if st.session_state.confirm_delete_id:
-    st.warning(f"Êtes-vous sûr de vouloir supprimer l'élément '{st.session_state.confirm_delete_id}' de type '{st.session_state.confirm_delete_type}' ? Cette action est irréversible.")
-    col_confirm_yes, col_confirm_no = st.columns(2)
-    with col_confirm_yes:
-        if st.button("Oui, Supprimer Définitivement", key="confirm_delete_yes_btn"):
-            perform_delete(st.session_state.confirm_delete_id, st.session_state.confirm_delete_type)
-    with col_confirm_no:
-        if st.button("Non, Annuler", key="confirm_delete_no_btn"):
-            hide_confirm_modal()
-
-
-# --- Titre de l'application Streamlit ---
+# --- Configuration Générale de l'Application Streamlit ---
 st.set_page_config(
-    page_title="CARTEL DES PLAISIRS - QG Créateur",
+    page_title="L'ARCHITECTE Ω - Micro-Empire Musical IA",
+    page_icon="🎵",
     layout="wide",
     initial_sidebar_state="expanded"
 )
 
-st.title("😈 Le Quartier Général du CARTEL DES PLAISIRS 😈")
-st.markdown("---")
+# --- Initialisation de st.session_state ---
+# Un dictionnaire central pour gérer l'état de l'application
+if 'app_initialized' not in st.session_state:
+    st.session_state['app_initialized'] = True
+    st.session_state['current_page'] = 'Accueil'
+    st.session_state['user_id'] = 'Gardien' # Peut être étendu pour des profils utilisateur
+    st.session_state['theme_mode'] = 'light' # Ou 'dark', si tu veux un toggle plus tard
+    st.session_state['selected_morceau_id'] = None # Pour le lecteur audio et les détails du morceau
 
-# --- Navigation ---
-st.sidebar.title("Navigation")
-current_page_from_query = st.query_params.get("page", ["Accueil"])[0].replace("%20", " ")
-
-nav_options = [
-    "Accueil",
-    "Générateur de Texte (Standalone)",
-    "Générateur de Suite",
-    "Atelier de Production & Publication",
-    "Générateur de Tendances Marché",
-    "Générateur de Performances",
-    "Veille Stratégique",
-    "Portfolio & Performance",
-    "Finances du Cartel",
-    "Directive Stratégique de l'Oracle",
-    "Gestion des Univers & Personnages",
-    "Gestion des Styles d'Écriture"
-]
-
-if current_page_from_query in nav_options:
-    page = st.sidebar.radio("Aller à :", nav_options, index=nav_options.index(current_page_from_query))
-else:
-    page = st.sidebar.radio("Aller à :", nav_options)
+# --- Vérification et Création des Dossiers d'Assets ---
+for directory in [ASSETS_DIR, AUDIO_CLIPS_DIR, SONG_COVERS_DIR, ALBUM_COVERS_DIR, GENERATED_TEXTS_DIR]:
+    os.makedirs(directory, exist_ok=True)
+    # st.sidebar.write(f"Dossier {directory} vérifié.") # Décommenter pour debug si besoin
 
 
-# --- Contenu des pages ---
-
-if page == "Accueil":
-    st.header("Bienvenue, Gardien !")
-    st.write("Ce tableau de bord est le centre de commandement de votre micro-empire médiatique. Utilisez la barre latérale pour naviguer.")
-
-    st.subheader("Vos Œuvres Actuelles (Directement de Google Sheets)")
-    df_oeuvres = sheets_connector.load_data_from_sheet(config.WORKSHEET_NAME_OEUVRES)
-
-    if not df_oeuvres.empty:
-        st.write(f"**{len(df_oeuvres)}** œuvres enregistrées dans le Sanctuaire.")
-        df_oeuvres['Serie_Info'] = df_oeuvres.apply(
-            lambda row: f"Série: {row['ID_Parent_Serie']} (Tome {row['Numero_Tome']})" if row['ID_Parent_Serie'] and row['Numero_Tome'] and row['Numero_Tome'] > 0 else "Standalone", axis=1
-        )
-        st.dataframe(df_oeuvres[['ID_Oeuvre', 'Titre_Original', 'Statut_Publication', 'Date_Creation', 'Serie_Info']].head(10))
+# --- Fonctions Utilitaires d'Affichage (peut être déplacé dans utils.py à terme si elles grossissent) ---
+def display_dataframe(df: pd.DataFrame, title: str = "", key: str = ""):
+    """Affiche un DataFrame avec un titre et un key unique pour Streamlit."""
+    if title:
+        st.subheader(title)
+    if not df.empty:
+        st.dataframe(df, use_container_width=True, key=key)
     else:
-        st.info("Aucune œuvre dans l'onglet 'Oeuvres' ou problème de connexion.")
+        st.info("Aucune donnée à afficher pour le moment.")
 
+def get_base64_image(image_path: str):
+    """Encode une image en base64 pour l'intégration directe dans Streamlit (si besoin) ou CSS."""
+    if os.path.exists(image_path):
+        with open(image_path, "rb") as img_file:
+            return base64.b64encode(img_file.read()).decode()
+    return None
 
-elif page == "Générateur de Texte (Standalone)":
-    st.header("✨ Générateur de Texte (Standalone) : Invoquez l'Oracle")
-    st.write("Utilisez les paramètres ci-dessous pour guider l'Oracle dans la création d'une nouvelle œuvre érotique indépendante. Le texte généré sera automatiquement sauvegardé dans votre Google Sheet ET localement sur votre machine.")
-    st.info("💡 **Performance :** Les opérations de génération (texte, prompts, kit de lancement) peuvent prendre quelques secondes (jusqu'à 30-60 secondes pour les plus longs textes). Streamlit affichera un indicateur de chargement. Pour des applications de plus grande envergure avec des traitements très lourds en arrière-plan, il serait nécessaire d'intégrer un système de files d'attente (comme Celery avec Redis ou RabbitMQ) pour que l'interface utilisateur reste réactive. Cependant, pour une application locale comme celle-ci, l'approche actuelle est généralement suffisante et plus simple à maintenir.")
+def set_background_image(image_path: str):
+    """Définit une image de fond pour l'application Streamlit."""
+    bin_img = get_base64_image(image_path)
+    if bin_img:
+        st.markdown(
+            f"""
+            <style>
+            .stApp {{
+                background-image: url("data:image/png;base64,{bin_img}");
+                background-size: cover;
+                background-repeat: no-repeat;
+                background-attachment: fixed;
+            }}
+            </style>
+            """,
+            unsafe_allow_html=True
+        )
 
+# Tu peux choisir une image de fond par défaut ici si tu en as une.
+# Par exemple, une image générique de synthwave ou de paysage cosmique.
+# set_background_image(os.path.join(ASSETS_DIR, "background_default.jpg")) # Décommenter et adapter
 
-    default_theme = "cyberpunk"
-    default_mood = "sensuel"
-    default_protagonist_type = "humain"
-    default_pov = "troisième personne"
-    default_spiciness = "modéré"
-    default_setting = "futuriste"
-    default_tropes = ""
-    default_plot_elements_standalone = ""
-    default_character_details_standalone = ""
-    default_style_description = ""
+# --- Menu de Navigation Latéral ---
+st.sidebar.title("ARCHITECTE Ω - Menu")
 
-    df_univers = sheets_connector.load_data_from_sheet(config.WORKSHEET_NAME_UNIVERS)
-    universe_options = [''] + ([f"{row['ID_Univers']} - {row['Nom_Univers']}" for _, row in df_univers.iterrows()] if not df_univers.empty else [])
-    selected_universe_str = st.selectbox("Lier à un Univers existant (Facultatif) :", universe_options, key="standalone_universe_select")
+menu_options = {
+    "Accueil": "🏠 Vue d'ensemble de l'empire.",
+    "Création Musicale IA": {
+        "Générateur de Contenu": "✍️ Paroles, Prompts Audio, Titres...",
+        "Co-pilote Créatif": "💡 Idées en temps réel (Beta)",
+        "Création Multimodale": "🎬 Audio, Visuel, Paroles (Synchronisé)"
+    },
+    "Gestion du Sanctuaire": {
+        "Mes Morceaux": "🎶 Gérer les créations musicales",
+        "Mes Albums": "💿 Gérer les collections",
+        "Mes Artistes IA": "🤖 Gérer les identités IA",
+        "Paroles Existantes": "📜 Consulter mes paroles manuelles"
+    },
+    "Analyse & Stratégie": {
+        "Stats & Tendances Sim.": "📊 Analyser les performances virtuelles",
+        "Directives Stratégiques": "🎯 Conseils de l'Oracle",
+        "Potentiel Viral & Niches": "📈 Détecter les opportunités"
+    },
+    "Bibliothèques de l'Oracle": {
+        "Styles Musicaux": "🎸 Explorer les genres",
+        "Styles Lyriques": "📝 Définir les écritures",
+        "Thèmes & Concepts": "🌌 Naviguer les idées",
+        "Moods & Émotions": "❤️ Préciser les ressentis",
+        "Instruments & Voix": "🎤 Palette sonore",
+        "Structures de Chanson": "🏛️ Modèles de composition",
+        "Règles de Génération": "⚖️ Contrôler l'IA"
+    },
+    "Outils & Projets": {
+        "Projets en Cours": "🚧 Suivi de production",
+        "Outils IA Référencés": "🛠️ Boîte à outils IA",
+        "Timeline Événements": "🗓️ Planification des lancements"
+    },
+    "Historique de l'Oracle": "📚 Traces de nos interactions"
+}
 
-    selected_universe_data = {}
-    if selected_universe_str:
-        universe_id = selected_universe_str.split(' - ')[0]
-        if not df_univers.empty and universe_id in df_univers['ID_Univers'].tolist():
-            selected_universe_data = df_univers[df_univers['ID_Univers'] == universe_id].iloc[0].to_dict()
-            default_theme = selected_universe_data.get('Nom_Univers', default_theme)
-            default_setting = selected_universe_data.get('Description_Globale', default_setting).split('.')[0].strip() if selected_universe_data.get('Description_Globale') else default_setting
-            default_plot_elements_standalone = selected_universe_data.get('Elements_Cles_Intrigue', '')
-            default_character_details_standalone = selected_universe_data.get('Personnages_Cles', '')
-            st.info(f"Les paramètres ont été pré-remplis avec les détails de l'univers '{selected_universe_data.get('Nom_Univers', 'Inconnu')}'.")
+# Fonction pour afficher les options du menu
+def display_menu(options_dict, parent_key=""):
+    for key, value in options_dict.items():
+        full_key = f"{parent_key}_{key}" if parent_key else key
+        if isinstance(value, dict):
+            with st.sidebar.expander(key):
+                display_menu(value, full_key)
         else:
-            st.warning(f"L'ID d'univers '{universe_id}' n'a pas été trouvé. Création d'une œuvre standalone sans lien d'univers.")
+            if st.sidebar.button(f"{value} {key}", key=f"menu_button_{full_key}"):
+                st.session_state['current_page'] = key
+
+# Affichage dynamique du menu
+display_menu(menu_options)
+
+# --- Contenu principal de la page (sera rempli dans les prochaines sections) ---
+st.title(f"Page : {st.session_state['current_page']}")
+
+# Cette section est un placeholder. Le contenu réel sera ajouté après.
+if st.session_state['current_page'] == 'Accueil':
+    st.write("Bienvenue dans votre Quartier Général de Micro-Empire Numérique Musical IA. Utilisez le menu latéral pour naviguer.")
+    st.info("Pensez à bien configurer vos dossiers d'assets et vos secrets dans `.streamlit/secrets.toml`!") 
+
+# app.py - Suite du code
+
+# --- Page : Générateur de Contenu (Création Musicale IA) ---
+if st.session_state['current_page'] == 'Générateur de Contenu':
+    st.header("✍️ Générateur de Contenu Musical par l'Oracle")
+    st.write("Utilisez cette interface pour demander à l'Oracle de générer des paroles, des prompts audio, des titres, des descriptions marketing et des prompts visuels pour vos pochettes d'album.")
+
+    content_type = st.radio(
+        "Quel type de contenu souhaitez-vous générer ?",
+        ["Paroles de Chanson", "Prompt Audio (pour SUNO)", "Idées de Titres", "Description Marketing", "Prompt Pochette d'Album"],
+        key="content_type_radio"
+    )
+
+    st.markdown("---") # Séparateur visuel
+
+    # --- Formulaire de Génération de Paroles ---
+    if content_type == "Paroles de Chanson":
+        st.subheader("Générer des Paroles de Chanson")
+        with st.form("lyrics_generator_form"):
+            col1, col2 = st.columns(2)
+            with col1:
+                st.selectbox("Genre Musical", sc.get_all_styles_musicaux()['ID_Style_Musical'].tolist(), key="lyrics_genre_musical")
+                st.selectbox("Mood Principal", sc.get_all_moods()['ID_Mood'].tolist(), key="lyrics_mood_principal")
+                st.selectbox("Thème Principal Lyrique", sc.get_all_themes()['ID_Theme'].tolist(), key="lyrics_theme_lyrique_principal")
+                st.selectbox("Style Lyrique", sc.get_all_styles_lyriques()['ID_Style_Lyrique'].tolist(), key="lyrics_style_lyrique")
+                st.text_input("Mots-clés de Génération (séparés par des virgules)", key="lyrics_mots_cles_generation")
+            with col2:
+                st.selectbox("Structure de Chanson", sc.get_all_structures_song()['ID_Structure'].tolist(), key="lyrics_structure_chanson")
+                st.selectbox("Langue des Paroles", ["Français", "Anglais", "Espagnol"], key="lyrics_langue_paroles")
+                st.selectbox("Niveau de Langage", ["Familier", "Courant", "Soutenu", "Poétique", "Argotique", "Technique"], key="lyrics_niveau_langage_paroles")
+                st.selectbox("Imagerie Texte", ["Forte et Descriptive", "Métaphorique", "Abstraite", "Concrète"], key="lyrics_imagerie_texte")
+               
+                # --- Intégration de Modèles "Empathiques" (pour les Moods) ---
+                if st.session_state.get('lyrics_mood_principal'):
+                    if st.button("Affiner le Mood avec l'Oracle 🧠", key="refine_mood_button"):
+                        with st.spinner("L'Oracle affine le mood..."):
+                            mood_questions = go.refine_mood_with_questions(st.session_state.lyrics_mood_principal)
+                            st.session_state['mood_refinement_questions'] = mood_questions
+                    if 'mood_refinement_questions' in st.session_state and st.session_state.mood_refinement_questions:
+                        st.info("Voici les questions de l'Oracle pour affiner votre mood :\n" + st.session_state.mood_refinement_questions)
+                        st.text_area("Vos réponses / Affinement du mood (optionnel)", key="lyrics_mood_refinement_response")
 
 
-    df_styles = sheets_connector.load_data_from_sheet(config.WORKSHEET_NAME_STYLES)
-    style_options = [''] + ([f"{row['ID_Style']} - {row['Nom_Style']}" for _, row in df_styles.iterrows()] if not df_styles.empty else [])
-    selected_style_str = st.selectbox("Choisir un Style d'Écriture (Facultatif) :", style_options, key="standalone_style_select")
+            submit_lyrics_button = st.form_submit_button("Générer les Paroles")
 
-    if selected_style_str:
-        style_id = selected_style_str.split(' - ')[0]
-        if not df_styles.empty and style_id in df_styles['ID_Style'].tolist():
-            selected_style_data = df_styles[df_styles['ID_Style'] == style_id].iloc[0]
-            default_style_description = selected_style_data.get('Description_Style', '')
-            default_spiciness = selected_style_data.get('Niveau_Explicite_Defaut', default_spiciness)
-            st.info(f"Les paramètres de style et de sensualité ont été pré-remplis avec le style '{selected_style_data.get('Nom_Style', 'Inconnu')}'.")
-        else:
-            st.warning(f"L'ID de style '{style_id}' n'a pas été trouvé. La génération se fera sans style spécifique.")
-
-
-    if st.session_state.generated_narrative_params and st.session_state.generated_narrative_params.get("objective_text_generation"):
-        params = st.session_state.generated_narrative_params
-        default_theme = params.get("theme", default_theme)
-        default_mood = params.get("mood", default_mood)
-        default_protagonist_type = params.get("protagonist_type", default_protagonist_type)
-        default_setting = params.get("setting", default_setting)
-        default_spiciness = params.get("spiciness", default_spiciness)
-        if params.get("tropes"):
-            default_tropes = ", ".join(params["tropes"])
-        st.info("Les paramètres du générateur ont été pré-remplis par la Directive Stratégique de l'Oracle.")
-        st.session_state.generated_narrative_params = None
-
-
-    with st.form("text_generation_form"):
-        st.subheader("Paramètres de Génération :")
-        col1, col2 = st.columns(2)
-        with col1:
-            theme_input = st.text_input("Thème principal (ex: 'cyberpunk', 'fantasy')", value=default_theme, key="gen_theme_input")
-            mood_options = ["sensuel", "passionné", "mystérieux", "dark", "joyeux", "dramatique"]
-            try:
-                mood_index = mood_options.index(default_mood)
-            except ValueError:
-                mood_index = 0
-            mood_input = st.selectbox("Ambiance / Ton :", mood_options, index=mood_index, key="gen_mood_input")
-
-            protagonist_type_input = st.text_input("Type de protagoniste (ex: 'humain', 'cyborg', 'elfe')", value=default_protagonist_type, key="gen_protagonist_type_input")
-        with col2:
-            pov_options = ["première personne", "troisième personne"]
-            try:
-                pov_index = pov_options.index(default_pov)
-            except ValueError:
-                pov_index = 1
-            pov_input = st.selectbox("Point de vue narratif :", pov_options, index=pov_index, key="gen_pov_input")
-
-            spiciness_options = ["doux", "modéré", "explicite"]
-            try:
-                spiciness_index = spiciness_options.index(default_spiciness)
-            except ValueError:
-                spiciness_index = 1
-            spiciness_input = st.selectbox("Niveau de sensualité :", spiciness_options, index=spiciness_index, key="gen_spiciness_input")
-
-            setting_input = st.text_input("Cadre de l'histoire (ex: 'futuriste', 'médiéval')", value=default_setting, key="gen_setting_input")
-
-        tropes_input = st.text_area("Tropes / Fétiches spécifiques (séparés par des virgules, facultatif) :", placeholder="ex: 'amour interdit, rivalité, pouvoirs magiques'", value=default_tropes, key="gen_tropes_input")
-        plot_elements_input = st.text_area("Éléments clés de l'intrigue à inclure (issus de l'univers si lié) :", value=default_plot_elements_standalone, key="gen_plot_elements_input")
-        character_details_input = st.text_area("Détails sur les personnages principaux (issus de l'univers si lié) :", value=default_character_details_standalone, key="gen_character_details_input")
-
-        st.text_area("Description du Style d'Écriture sélectionné :", value=default_style_description, height=150, disabled=True, key="gen_style_description_display")
-
-        length_words_input = st.slider("Longueur approximative (mots) :", min_value=200, max_value=20000, value=500, step=100, key="gen_length_words_input")
-        num_variants_input = st.slider("Nombre de variantes à générer :", min_value=1, max_value=3, value=1, step=1, key="gen_num_variants_input")
-
-        st.subheader("Métadonnées de l'Œuvre :")
-        titre_original_input = st.text_input("Titre de travail de l'Œuvre :", value=f"Nouvelle Œuvre - {datetime.now().strftime('%Y-%m-%d %H:%M')}", key="gen_titre_original_input")
-        description_courte_input_field = st.text_area("Courte description / Pitch (sera rempli par le résumé généré si vide) :", value="", key="gen_description_courte_input_field")
-
-        submitted = st.form_submit_button("Générer & Sauvegarder l'Œuvre Standalone")
-
-        if submitted:
-            theme = st.session_state.gen_theme_input.strip() if st.session_state.gen_theme_input else "général"
-            mood = st.session_state.gen_mood_input.strip() if st.session_state.gen_mood_input else "sensuel"
-            protagonist_type = st.session_state.gen_protagonist_type_input.strip() if st.session_state.gen_protagonist_type_input else "humain"
-            pov = st.session_state.gen_pov_input.strip() if st.session_state.gen_pov_input else "troisième personne"
-            spiciness = st.session_state.gen_spiciness_input.strip() if st.session_state.gen_spiciness_input else "modéré"
-            setting = st.session_state.gen_setting_input.strip() if st.session_state.gen_setting_input else "futuriste"
-
-            tropes = [t.strip() for t in st.session_state.gen_tropes_input.split(',') if t.strip()] if st.session_state.gen_tropes_input else None
-            plot_elements = [e.strip() for e in st.session_state.gen_plot_elements_input.split(',') if e.strip()] if st.session_state.gen_plot_elements_input else None
-            character_details = [d.strip() for d in st.session_state.gen_character_details_input.split(',') if d.strip()] if st.session_state.gen_character_details_input else None
-
-            length_words = st.session_state.gen_length_words_input
-            num_variants = st.session_state.gen_num_variants_input
-            titre_original = st.session_state.gen_titre_original_input.strip() if st.session_state.gen_titre_original_input else f"Nouvelle Œuvre - {datetime.now().strftime('%Y-%m-%d %H:%M')}"
-            description_courte = st.session_state.gen_description_courte_input_field.strip()
-
-            generated_data_list = []
-            for i in range(num_variants):
-                with st.spinner(f"L'Oracle est à l'œuvre... Génération de la variante {i+1}/{num_variants}..."):
-                    generated_text = gemini_oracle.generate_erotic_text(
-                        theme=theme,
-                        mood=mood,
-                        length_words=length_words,
-                        protagonist_type=protagonist_type,
-                        setting=setting,
-                        pov=pov,
-                        spiciness=spiciness,
-                        tropes=tropes,
-                        plot_elements=plot_elements,
-                        character_details=character_details,
-                        writing_style_description=default_style_description
+            if submit_lyrics_button:
+                with st.spinner("L'Oracle compose les paroles..."):
+                    generated_lyrics = go.generate_song_lyrics(
+                        genre_musical=st.session_state.lyrics_genre_musical,
+                        mood_principal=st.session_state.lyrics_mood_principal,
+                        theme_lyrique_principal=st.session_state.lyrics_theme_lyrique_principal,
+                        style_lyrique=st.session_state.lyrics_style_lyrique,
+                        mots_cles_generation=st.session_state.lyrics_mots_cles_generation,
+                        structure_chanSONG=st.session_state.lyrics_structure_chanson,
+                        langue_paroles=st.session_state.lyrics_langue_paroles,
+                        niveau_langage_paroles=st.session_state.lyrics_niveau_langage_paroles,
+                        imagerie_texte=st.session_state.lyrics_imagerie_texte
                     )
-                    image_prompts = gemini_oracle.generate_image_prompts(generated_text)
-                    launch_kit = gemini_oracle.generate_launch_kit(generated_text)
+                    st.session_state['generated_lyrics'] = generated_lyrics
+                    st.success("Paroles générées avec succès !")
 
-                generated_data_list.append({
-                    "text": generated_text,
-                    "image_prompts": image_prompts,
-                    "launch_kit": launch_kit,
-                    "titre_original": f"{titre_original} - Var {i+1}" if num_variants > 1 else titre_original,
-                    "description_courte_input": description_courte
-                })
-
-            for i, data in enumerate(generated_data_list):
-                st.markdown(f"### Résultats de la Variante {i+1}")
-                st.subheader("Texte Généré :")
-                st.text_area(f"Contenu de l'œuvre (Variante {i+1})", value=data["text"], height=400, disabled=True, key=f"text_gen_{i}")
-
-                st.subheader("Suggestions de l'Oracle :")
-                st.write("##### Prompts d'Image :")
-                for j, prompt in enumerate(data["image_prompts"]):
-                    st.code(f"Prompt {j+1}:\n{prompt}")
-
-                st.write("##### Kit de Lancement :")
-                st.write(f"**Titres :** {', '.join(data['launch_kit']['titles'])}")
-                st.markdown(f"**Résumé :** {data['launch_kit']['summary']}")
-                st.write(f"**Tags :** {', '.join(data['launch_kit']['tags'])}")
-
-                universe_id_to_save = selected_universe_data.get('ID_Univers', '')
-                if sheets_connector.save_new_oeuvre_to_sheet(
-                    data["text"], data["image_prompts"], data["launch_kit"],
-                    titre_original=data["titre_original"],
-                    description_courte=data["description_courte_input"],
-                    id_parent_serie=universe_id_to_save,
-                    numero_tome=1 if universe_id_to_save else ""
-                ):
-                    st.success(f"Variante {i+1} sauvegardée avec succès dans Google Sheets et localement !")
-
-            sheets_connector.load_data_from_sheet.clear()
-
-
-elif page == "Générateur de Suite":
-    st.header("📚 Générateur de Suite : L'Oracle Conteur de Saga")
-    st.write("Sélectionnez une œuvre existante pour laquelle l'Oracle va générer une suite. Les éléments clés (résumé, personnages, intrigue) seront automatiquement extraits de l'œuvre précédente pour assurer la continuité.")
-    st.info("💡 **Performance :** Les opérations de génération (texte, prompts, kit de lancement) peuvent prendre quelques secondes (jusqu'à 30-60 secondes pour les plus longs textes). Streamlit affichera un indicateur de chargement. Pour des applications de plus grande envergure avec des traitements très lourds en arrière-plan, il serait nécessaire d'intégrer un système de files d'attente (comme Celery avec Redis ou RabbitMQ) pour que l'interface utilisateur reste réactive. Cependant, pour une application locale comme celle-ci, l'approche actuelle est généralement suffisante et plus simple à maintenir.")
-
-
-    df_oeuvres = sheets_connector.load_data_from_sheet(config.WORKSHEET_NAME_OEUVRES)
-    df_univers = sheets_connector.load_data_from_sheet(config.WORKSHEET_NAME_UNIVERS)
-
-    if df_oeuvres.empty:
-        st.info("Aucune œuvre disponible pour générer une suite. Créez d'abord une œuvre standalone via 'Générateur de Texte (Standalone)'.")
-    else:
-        df_published_oeuvres = df_oeuvres[df_oeuvres['Statut_Publication'].isin(["Publié", "Prêt à Publier"])].copy()
-
-        if df_published_oeuvres.empty:
-            st.info("Aucune œuvre 'Publiée' ou 'Prête à Publier' pour générer une suite. Finalisez d'abord une œuvre.")
-        else:
-            df_published_oeuvres['Display_Name'] = df_published_oeuvres.apply(
-                lambda row: f"{row['Titre_Original']} (ID: {row['ID_Oeuvre']})" if row['Titre_Original'] else f"ID: {row['ID_Oeuvre']}", axis=1
+        if 'generated_lyrics' in st.session_state and st.session_state.generated_lyrics:
+            st.markdown("---")
+            st.subheader("Paroles Générées")
+            st.text_area("Copiez les paroles ici :", st.session_state.generated_lyrics, height=400, key="displayed_generated_lyrics")
+           
+            # Option de sauvegarde des paroles
+            save_lyrics_option = st.radio(
+                "Où souhaitez-vous sauvegarder ces paroles ?",
+                ["Ne pas sauvegarder", "Dans un nouveau Morceau (Google Sheet)", "Dans un Morceau Existant (Google Sheet)", "Dans un fichier local"],
+                key="save_lyrics_option"
             )
 
-            selected_previous_oeuvre_str = st.selectbox(
-                "Sélectionnez l'œuvre précédente (Parent) pour laquelle générer une suite :",
-                [''] + df_published_oeuvres['Display_Name'].tolist(),
-                key="suite_parent_select"
-            )
-
-            selected_parent_oeuvre = {}
-            if selected_previous_oeuvre_str:
-                selected_parent_id = selected_previous_oeuvre_str.split('ID: ')[1].replace(')', '')
-                if not df_published_oeuvres.empty and selected_parent_id in df_published_oeuvres['ID_Oeuvre'].tolist():
-                    selected_parent_oeuvre = df_published_oeuvres[df_published_oeuvres['ID_Oeuvre'] == selected_parent_id].iloc[0].to_dict()
-                    st.subheader(f"Génération de suite pour : {selected_parent_oeuvre.get('Titre_Original', 'Œuvre Inconnue')}")
-                else:
-                    st.warning(f"L'ID d'œuvre parente '{selected_parent_id}' n'a pas été trouvé. Veuillez sélectionner une œuvre valide.")
-
-                default_plot_summary_suite = ""
-                default_character_details_suite = ""
-                default_sequel_directives = ""
-                default_style_description_suite = ""
-
-                if st.session_state.generated_narrative_params and st.session_state.generated_narrative_params.get("objective_text_generation_suite"):
-                    params = st.session_state.generated_narrative_params
-                    default_sequel_directives = params.get("sequel_directives", "")
-                    st.info("Les paramètres du générateur de suite ont été pré-remplis par la Directive Stratégique de l'Oracle.")
-                    st.session_state.generated_narrative_params = None
-
-                parent_full_text = ""
-                universe_plot_elements = ""
-                universe_character_details = ""
-
-                if selected_parent_oeuvre.get('ID_Parent_Serie') and not df_univers.empty:
-                    parent_universe_id = selected_parent_oeuvre['ID_Parent_Serie']
-                    universe_data = df_univers[df_univers['ID_Univers'] == parent_universe_id]
-                    if not universe_data.empty:
-                        universe_data = universe_data.iloc[0]
-                        universe_plot_elements = universe_data.get('Elements_Cles_Intrigue', '')
-                        universe_character_details = universe_data.get('Personnages_Cles', '')
-                        st.info(f"Contexte pré-rempli avec la mémoire de l'univers '{universe_data.get('Nom_Univers', 'Inconnu')}'.")
-                    else:
-                        st.warning(f"L'univers parent '{parent_universe_id}' n'a pas été trouvé. Les données seront extraites du texte de l'œuvre.")
-
-
-                if not universe_plot_elements or not universe_character_details:
-                    if selected_parent_oeuvre.get('Texte_Genere'):
-                        parent_full_text = selected_parent_oeuvre.get('Texte_Genere')
-                    elif selected_parent_oeuvre.get('URL_Texte_Local'):
-                        local_text_path_relative = selected_parent_oeuvre['URL_Texte_Local']
-                        local_text_path = os.path.join(os.path.dirname(__file__), local_text_path_relative)
-                        if os.path.exists(local_text_path):
-                            with open(local_text_path, 'r', encoding='utf-8') as f:
-                                parent_full_text = f.read()
-
-                    if parent_full_text and parent_full_text.strip() != "":
-                        with st.spinner("L'Oracle analyse le tome précédent pour un pré-remplissage intelligent (intrigue et personnages)..."):
-                            if not universe_plot_elements:
-                                auto_plot_summary_from_parent = gemini_oracle.summarize_plot(parent_full_text)
-                            else:
-                                auto_plot_summary_from_parent = universe_plot_elements
-
-                            if not universe_character_details:
-                                auto_character_details_from_parent = gemini_oracle.extract_character_details(parent_full_text)
-                            else:
-                                auto_character_details_from_parent = universe_character_details
-                    else:
-                        st.info("Le texte de l'œuvre parente est vide ou introuvable. Veuillez saisir manuellement le contexte.")
-                        auto_plot_summary_from_parent = selected_parent_oeuvre.get('Resume_Suggere', selected_parent_oeuvre.get('Description_Courte', ''))
-                        auto_character_details_from_parent = "Veuillez saisir les personnages du tome précédent."
-                else:
-                    auto_plot_summary_from_parent = universe_plot_elements
-                    auto_character_details_from_parent = universe_character_details
-
-
-                final_plot_summary_for_input = auto_plot_summary_from_parent
-                final_character_details_for_input = auto_character_details_from_parent
-
-                df_styles = sheets_connector.load_data_from_sheet(config.WORKSHEET_NAME_STYLES)
-                style_options_suite = [''] + ([f"{row['ID_Style']} - {row['Nom_Style']}" for _, row in df_styles.iterrows()] if not df_styles.empty else [])
-                selected_style_suite_str = st.selectbox("Choisir un Style d'Écriture (Facultatif) :", style_options_suite, key="suite_style_select")
-
-                selected_style_suite_data = {}
-                default_style_description_suite = ""
-                if selected_style_suite_str:
-                    style_id_suite = selected_style_suite_str.split(' - ')[0]
-                    if not df_styles.empty and style_id_suite in df_styles['ID_Style'].tolist():
-                        selected_style_suite_data = df_styles[df_styles['ID_Style'] == style_id_suite].iloc[0].to_dict()
-                        default_style_description_suite = selected_style_suite_data.get('Description_Style', '')
-                        st.info(f"Le style d'écriture a été défini sur '{selected_style_suite_data.get('Nom_Style', 'Inconnu')}'.")
-                    else:
-                        st.warning(f"L'ID de style '{style_id_suite}' n'a pas été trouvé. La génération de suite se fera sans style spécifique.")
-
-                next_tome_number = 2
-                parent_tome_num = pd.to_numeric(selected_parent_oeuvre.get('Numero_Tome', 1), errors='coerce')
-                if pd.notna(parent_tome_num) and parent_tome_num >= 1:
-                    if selected_parent_oeuvre.get('ID_Parent_Serie'):
-                        related_series_tomes = df_oeuvres[df_oeuvres['ID_Parent_Serie'] == selected_parent_oeuvre['ID_Parent_Serie']].copy()
-                        related_series_tomes['Numero_Tome_Num'] = pd.to_numeric(related_series_tomes['Numero_Tome'], errors='coerce')
-                        if not related_series_tomes.empty and related_series_tomes['Numero_Tome_Num'].notna().any():
-                            max_tome_num = related_series_tomes['Numero_Tome_Num'].max()
-                            if pd.notna(max_tome_num):
-                                next_tome_number = int(max_tome_num) + 1
-                            else:
-                                next_tome_number = 2
-                        else:
-                            next_tome_number = int(parent_tome_num) + 1
-                    else:
-                        next_tome_number = int(parent_tome_num) + 1
-                else:
-                    st.warning("Numéro de tome du parent non valide. Le prochain tome sera défini par défaut à 2.")
-                    next_tome_number = 2
-
-
-                with st.form("suite_generation_form"):
-                    st.subheader("Contexte Narratif de la Suite (Pré-rempli par l'Oracle)")
-                    plot_input = st.text_area("Résumé de l'intrigue du tome précédent (modifiable) :", value=final_plot_summary_for_input, height=100, key="previous_plot_input")
-                    characters_input = st.text_area("Détails clés sur les personnages du tome précédent (modifiable) :", value=final_character_details_for_input, height=100, key="previous_characters_input")
-
-                    sequel_directives_input = st.text_area("Directives spécifiques pour ce nouveau tome (éléments à inclure, arcs narratifs) :", placeholder="Ex: 'Introduire un nouvel antagoniste, développer leur relation, un retournement de situation inattendu.'", value=default_sequel_directives, key="sequel_directives_input")
-
-                    length_words_suite = st.slider("Longueur approximative de la suite (mots) :", min_value=200, max_value=20000, value=selected_parent_oeuvre.get('length_words_original', 500), step=100, key="length_words_suite")
-                    num_variants_suite = st.slider("Nombre de variantes de la suite à générer :", min_value=1, max_value=3, value=1, step=1, key="num_variants_suite")
-
-                    st.text_area("Description du Style d'Écriture sélectionné :", value=default_style_description_suite, height=100, disabled=True, key="suite_style_description_display")
-
-
-                    st.subheader("Métadonnées de la Suite :")
-                    titre_original_suite = st.text_input(f"Titre de travail de la Suite (Tome {next_tome_number}) :", value=f"{selected_parent_oeuvre.get('Titre_Original', 'Titre Inconnu')} - Tome {next_tome_number}", key="titre_original_suite")
-                    description_courte_suite = st.text_area("Courte description / Pitch pour cette suite :", value="", key="description_courte_suite")
-
-                    submitted_suite = st.form_submit_button("Générer & Sauvegarder la Suite")
-
-                    if submitted_suite:
-                        generated_data_list_suite = []
-                        for i in range(num_variants_suite):
-                            with st.spinner(f"L'Oracle est à l'œuvre... Génération de la variante {i+1}/{num_variants_suite} de la suite..."):
-                                generated_text_suite = gemini_oracle.generate_erotic_text_suite(
-                                    previous_text_summary=st.session_state.previous_plot_input,
-                                    previous_characters_summary=st.session_state.previous_characters_input,
-                                    previous_plot_summary=st.session_state.previous_plot_input,
-                                    sequel_directives=st.session_state.sequel_directives_input,
-                                    length_words=st.session_state.length_words_suite,
-                                    writing_style_description=default_style_description_suite
-                                )
-                                image_prompts_suite = gemini_oracle.generate_image_prompts(generated_text_suite)
-                                launch_kit_suite = gemini_oracle.generate_launch_kit(generated_text_suite)
-
-                            generated_data_list_suite.append({
-                                "text": generated_text_suite,
-                                "image_prompts": image_prompts_suite,
-                                "launch_kit": launch_kit_suite,
-                                "titre_original": f"{st.session_state.titre_original_suite} - Var {i+1}" if num_variants_suite > 1 else st.session_state.titre_original_suite,
-                                "description_courte_input": st.session_state.description_courte_suite
-                            })
-
-                        if selected_parent_oeuvre.get('ID_Parent_Serie') == "" or pd.isna(selected_parent_oeuvre.get('Numero_Tome')) or selected_parent_oeuvre.get('Numero_Tome') == 0:
-                            parent_updates = {'ID_Parent_Serie': selected_parent_id, 'Numero_Tome': 1}
-                            sheets_connector.update_oeuvre_in_sheet(selected_parent_id, parent_updates)
-                            st.info(f"L'œuvre parente '{selected_parent_oeuvre.get('Titre_Original', 'Œuvre Inconnue')}' a été marquée comme Tome 1 de cette nouvelle série.")
-                            sheets_connector.load_data_from_sheet.clear()
-
-
-                        for i, data in enumerate(generated_data_list_suite):
-                            st.markdown(f"### Résultats de la Suite - Variante {i+1}")
-                            st.subheader("Texte Généré :")
-                            st.text_area(f"Contenu de la suite (Variante {i+1})", value=data["text"], height=400, disabled=True, key=f"suite_text_gen_result_{i}")
-
-                            st.subheader("Suggestions de l'Oracle :")
-                            st.write("##### Prompts d'Image :")
-                            for j, prompt in enumerate(data["image_prompts"]):
-                                st.code(f"Prompt {j+1}:\n{prompt}")
-
-                            st.write("##### Kit de Lancement :")
-                            st.write(f"**Titres :** {', '.join(data['launch_kit']['titles'])}")
-                            st.markdown(f"**Résumé :** {data['launch_kit']['summary']}")
-                            st.write(f"**Tags :** {', '.join(data['launch_kit']['tags'])}")
-
-                            if sheets_connector.save_new_oeuvre_to_sheet(
-                                data["text"], data["image_prompts"], data["launch_kit"],
-                                titre_original=data["titre_original"],
-                                description_courte=data["description_courte_input"],
-                                id_parent_serie=selected_parent_id,
-                                numero_tome=next_tome_number
-                            ):
-                                st.success(f"Suite - Variante {i+1} sauvegardée avec succès dans Google Sheets et localement !")
-
-                        sheets_connector.load_data_from_sheet.clear()
-
-
-elif page == "Atelier de Production & Publication":
-    st.header("✍️ Atelier de Production & Publication : Peaufinez vos chefs-d'œuvre")
-    st.write("Sélectionnez une œuvre pour la peaufiner, gérer sa couverture, et définir sa stratégie de publication.")
-
-    df_oeuvres = sheets_connector.load_data_from_sheet(config.WORKSHEET_NAME_OEUVRES)
-
-    if not df_oeuvres.empty:
-        st.subheader("Sélectionnez une Œuvre")
-        df_oeuvres['Numero_Tome_Num'] = pd.to_numeric(df_oeuvres['Numero_Tome'], errors='coerce').fillna(0)
-        df_oeuvres_sorted = df_oeuvres.sort_values(by=['ID_Parent_Serie', 'Numero_Tome_Num', 'Date_Creation'], ascending=[True, True, False])
-
-        df_oeuvres_sorted['Display_Name_Full'] = df_oeuvres_sorted.apply(
-            lambda row: f"{row['Titre_Original']} (Tome {int(row['Numero_Tome_Num'])})" if row['ID_Parent_Serie'] and pd.notna(row['Numero_Tome_Num']) and row['Numero_Tome_Num'] > 0 else row['Titre_Original'], axis=1
-        )
-        oeuvre_options = [''] + [f"{row['ID_Oeuvre']} - {row['Display_Name_Full']}" for index, row in df_oeuvres_sorted.iterrows()]
-
-        selected_oeuvre_str = st.selectbox("Choisissez une œuvre :", oeuvre_options)
-
-        selected_oeuvre = None
-        if selected_oeuvre_str:
-            selected_id = selected_oeuvre_str.split(' - ')[0]
-            if selected_id in df_oeuvres_sorted['ID_Oeuvre'].tolist():
-                selected_oeuvre = df_oeuvres_sorted[df_oeuvres_sorted['ID_Oeuvre'] == selected_id].iloc[0]
-            else:
-                st.error(f"L'ID d'œuvre '{selected_id}' n'a pas été trouvé. Veuillez recharger la page ou choisir une œuvre valide.")
-                selected_oeuvre = None
-
-            if selected_oeuvre is not None:
-                st.subheader(f"Détails de l'Œuvre : {selected_oeuvre['Titre_Original']}")
-
-                if selected_oeuvre.get('ID_Parent_Serie') and selected_oeuvre.get('Numero_Tome'):
-                    st.info(f"Fait partie d'une série. Parent : {selected_oeuvre.get('ID_Parent_Serie')}, Tome : {selected_oeuvre.get('Numero_Tome')}")
-
-                tab_verb, tab_visual, tab_publish, tab_edit, tab_delete = st.tabs(["Le Verbe", "Le Visuel (Couverture)", "La Publication", "Édition Manuelle", "Suppression"])
-
-                with tab_verb:
-                    st.subheader("Le Verbe (Texte de l'Œuvre)")
-                    if 'Texte_Genere' in selected_oeuvre and pd.notna(selected_oeuvre['Texte_Genere']) and selected_oeuvre['Texte_Genere'].strip() != "":
-                        text_content_display = selected_oeuvre['Texte_Genere']
-                        st.text_area("Texte de l'œuvre (généré) :", value=text_content_display, height=400, disabled=True)
-                        clean_title_for_filename_gen = utils.clean_filename_slug(selected_oeuvre['Titre_Original'])
-                        st.download_button(
-                            label="Télécharger le Texte Généré (depuis Google Sheets)",
-                            data=text_content_display,
-                            file_name=f"{selected_oeuvre['ID_Oeuvre']}_{clean_title_for_filename_gen}.txt",
-                            mime="text/plain"
-                        )
-                    elif 'URL_Texte_Local' in selected_oeuvre and pd.notna(selected_oeuvre['URL_Texte_Local']) and selected_oeuvre['URL_Texte_Local'].strip() != "":
-                        local_text_path = os.path.join(os.path.dirname(__file__), selected_oeuvre['URL_Texte_Local'])
-                        if os.path.exists(local_text_path):
-                            with open(local_text_path, 'r', encoding='utf-8') as f:
-                                full_text = f.read()
-                            st.text_area("Contenu complet depuis fichier local :", value=full_text, height=400, disabled=True)
-                            clean_title_for_filename_local = utils.clean_filename_slug(selected_oeuvre['Titre_Original'])
-                            st.download_button(
-                                label="Télécharger le Texte Local",
-                                data=full_text,
-                                file_name=f"{selected_oeuvre['ID_Oeuvre']}_{clean_title_for_filename_local}_local.txt",
-                                mime="text/plain"
-                            )
-                        else:
-                            st.warning(f"Fichier texte local non trouvé à : {selected_oeuvre['URL_Texte_Local']}. Assurez-vous qu'il est dans le dossier 'assets/texts/'.")
-                    elif 'Description_Courte' in selected_oeuvre and pd.notna(selected_oeuvre['Description_Courte']) and selected_oeuvre['Description_Courte'].strip() != "":
-                        st.text_area("Description courte :", value=selected_oeuvre['Description_Courte'], height=150, disabled=True)
-                    else:
-                        st.info("Aucun texte ou description disponible pour cette œuvre.")
-
-
-                with tab_visual:
-                    st.subheader("Le Visuel (Gestion de Couverture)")
-                    st.write("Ces prompts sont générés par l'Oracle (Gemini). Utilisez-les avec un **outil de génération d'images EXTERNE et GRATUIT** (ex: [Clipdrop.co/stable-diffusion](https://clipdrop.co/stable-diffusion), [Leonardo.ai](https://app.leonardo.ai), ou des démos sur [Hugging Face Spaces](https://huggingface.co/spaces)) pour créer votre couverture. Ensuite, importez l'image ici.")
-
-                    st.markdown("##### Prompts d'Image Suggérés par l'Oracle (par Gemini) :")
-                    generated_prompts = []
-                    for i in range(1, 4):
-                        col_name = f'Prompt_Image_{i}'
-                        prompt_val = selected_oeuvre.get(col_name, '')
-                        if pd.notna(prompt_val) and prompt_val.strip() != "":
-                            generated_prompts.append(prompt_val)
-                            st.code(f"Prompt {i}: {prompt_val}")
-                        else:
-                            st.info(f"Prompt d'image {i} non disponible.")
-
-                    st.markdown("---")
-                    st.subheader("Importer votre Couverture Finale")
-
-                    default_custom_prompt_val = ""
-                    if generated_prompts and selected_oeuvre.get('Prompt_Image_Genere') in generated_prompts:
-                        default_custom_prompt_val = selected_oeuvre.get('Prompt_Image_Genere', '')
-                    elif selected_oeuvre.get('Prompt_Image_Genere'):
-                        default_custom_prompt_val = selected_oeuvre.get('Prompt_Image_Genere', '')
-                    elif generated_prompts:
-                        default_custom_prompt_val = generated_prompts[0]
-
-                    selected_prompt_for_doc = st.selectbox("Prompt de l'Oracle utilisé pour la génération externe (si applicable) :",
-                                                            [''] + generated_prompts,
-                                                            index=generated_prompts.index(selected_oeuvre.get('Prompt_Image_Genere', '')) + 1 if selected_oeuvre.get('Prompt_Image_Genere') in generated_prompts else 0,
-                                                            key="prompt_select_doc")
-                    custom_prompt_for_doc = selected_prompt_for_doc if selected_prompt_for_doc else default_custom_prompt_val
-                    custom_prompt_for_doc = st.text_area("Ou prompt personnalisé utilisé :", value=custom_prompt_for_doc, key="custom_prompt_doc")
-
-                    uploaded_file = st.file_uploader("Chargez votre image de couverture finale ici (.jpg, .png, etc.) :", type=["jpg", "png", "jpeg", "webp"], key="cover_uploader")
-
-                    image_path_input = st.text_input("Ou entrez le chemin local de l'image (ex: assets/covers/mon_image.jpg) :", value=selected_oeuvre.get('URL_Image_Couverture', ''), key="image_path_input")
-
-                    final_image_path_to_save = image_path_input
-
-                    if uploaded_file is not None:
-                        save_folder = config.COVERS_FOLDER
-                        file_extension = os.path.splitext(uploaded_file.name)[1]
-                        filename_slug_cover = utils.clean_filename_slug(selected_oeuvre['Titre_Original'])
-                        filename = f"{selected_oeuvre['ID_Oeuvre']}_cover_{filename_slug_cover}_{datetime.now().strftime('%Y%m%d%H%M%S')}{file_extension}"
-                        local_image_path_full = os.path.join(save_folder, filename) # Full path for saving
-                        final_image_path_to_save = os.path.join(os.path.basename(config.ASSETS_FOLDER), os.path.basename(config.COVERS_FOLDER), filename) # Relative path for sheets
-
-                        try:
-                            with open(local_image_path_full, "wb") as f:
-                                f.write(uploaded_file.getbuffer())
-                            st.success(f"Image chargée : {uploaded_file.name}. Sauvegardée localement : `{local_image_path_full}`")
-                        except Exception as e:
-                            st.error(f"Erreur lors de la sauvegarde du fichier local : {e}")
-                            final_image_path_to_save = ""
-
-                    if final_image_path_to_save:
-                        display_image_path = final_image_path_to_save
-                        if not os.path.isabs(display_image_path) and not display_image_path.startswith("http"):
-                            display_image_path = os.path.join(os.path.dirname(__file__), display_image_path)
-
-                        if os.path.exists(display_image_path):
-                            st.image(display_image_path, caption="Aperçu de la Couverture (Locale)", width=300)
-                        elif final_image_path_to_save.startswith("http"):
-                            st.image(final_image_path_to_save, caption="Aperçu de la Couverture (URL Distante)", width=300)
-                        else:
-                            st.warning(f"Le chemin '{final_image_path_to_save}' ne pointe pas vers un fichier local existant ou une URL valide.")
-                    else:
-                        st.info("Aucune image de couverture définie.")
-
-                    if st.button("Enregistrer la Couverture & Prompt dans Google Sheets", key="save_cover_btn"):
-                        updates = {
-                            'Prompt_Image_Genere': custom_prompt_for_doc,
-                            'URL_Image_Couverture': final_image_path_to_save
+            if save_lyrics_option == "Dans un nouveau Morceau (Google Sheet)":
+                with st.form("save_new_morceau_lyrics_form"):
+                    st.info("Ces paroles seront ajoutées à un nouveau morceau dans l'onglet `MORCEAUX_GENERES`.")
+                    # Pré-remplir certains champs avec les paramètres de génération
+                    new_morceau_title = st.text_input("Titre du nouveau morceau", value=f"Nouveau Morceau - {st.session_state.lyrics_genre_musical}", key="new_morceau_lyrics_title")
+                    new_morceau_artist_ia = st.selectbox("Artiste IA Associé", [""] + sc.get_all_artistes_ia()['ID_Artiste_IA'].tolist(), key="new_morceau_lyrics_artist_ia")
+                   
+                    save_button = st.form_submit_button("Sauvegarder le nouveau Morceau")
+                    if save_button:
+                        morceau_data = {
+                            'Titre_Morceau': new_morceau_title,
+                            'Statut_Production': 'Paroles Générées',
+                            'Prompt_Generation_Paroles': st.session_state.generated_lyrics,
+                            'ID_Style_Musical_Principal': st.session_state.lyrics_genre_musical,
+                            'ID_Style_Lyrique_Principal': st.session_state.lyrics_style_lyrique,
+                            'Theme_Principal_Lyrique': st.session_state.lyrics_theme_lyrique_principal,
+                            'Mots_Cles_Generation': st.session_state.lyrics_mots_cles_generation,
+                            'Langue_Paroles': st.session_state.lyrics_langue_paroles,
+                            'Niveau_Langage_Paroles': st.session_state.lyrics_niveau_langage_paroles,
+                            'Imagerie_Texte': st.session_state.lyrics_imagerie_texte,
+                            'Structure_Chanson_Specifique': st.session_state.lyrics_structure_chanson,
+                            'ID_Artiste_IA': new_morceau_artist_ia,
+                            'Ambiance_Sonore_Specifique': st.session_state.lyrics_mood_principal, # Ajout du mood
+                            'Effets_Production_Domination': '', 'Type_Voix_Desiree': '', 'Style_Vocal_Desire': '', 'Caractere_Voix_Desire': '',
+                            'Durée_Estimee': '', 'URL_Audio_Local': '', 'URL_Cover_Album': '', 'URL_Video_Clip_Associe': '', 'Mots_Cles_SEO': '', 'Description_Courte_Marketing': '',
+                            'ID_Album_Associe': '' # Assurer que toutes les colonnes sont présentes
                         }
-                        if sheets_connector.update_oeuvre_in_sheet(selected_oeuvre['ID_Oeuvre'], updates):
-                            sheets_connector.load_data_from_sheet.clear()
-                            st.rerun()
-
-
-                with tab_publish:
-                    st.subheader("La Publication (Kit de Lancement Final)")
-                    st.write("Définissez le kit de lancement final pour votre œuvre en vous basant sur les suggestions de l'Oracle.")
-
-                    st.write("##### Titres Suggérés par l'Oracle :")
-                    suggested_titles = []
-                    for i in range(1, 4):
-                        col_name = f'Titre_Suggere_{i}'
-                        title_val = selected_oeuvre.get(col_name, '')
-                        if pd.notna(title_val) and title_val.strip() != "":
-                            suggested_titles.append(title_val)
-                            st.write(f"- {title_val}")
+                        if sc.add_morceau_generes(morceau_data):
+                            st.success(f"Paroles sauvegardées comme nouveau morceau '{new_morceau_title}' dans Google Sheet !")
+                            del st.session_state['generated_lyrics'] # Nettoyer après sauvegarde
                         else:
-                            st.info(f"Titre suggéré {i} non disponible.")
-
-                    st.write("##### Résumé Captivant Suggéré par l'Oracle :")
-                    suggested_summary = selected_oeuvre.get('Resume_Suggere', '')
-                    if pd.notna(suggested_summary) and suggested_summary.strip() != "":
-                        st.markdown(suggested_summary)
-                    else:
-                        st.info("Résumé suggéré non disponible.")
-
-                    st.write("##### Tags Optimisés Suggérés par l'Oracle :")
-                    suggested_tags = selected_oeuvre.get('Tags_Suggérés', '')
-                    if pd.notna(suggested_tags) and suggested_tags.strip() != "":
-                        st.write(suggested_tags)
-                    else:
-                        st.info("Tags suggérés non disponibles.")
-
-                    st.markdown("---")
-                    st.subheader("Définir les Éléments de Publication Finaux")
-
-                    default_final_title = selected_oeuvre.get('Titre_Optimise', '')
-                    if not default_final_title and suggested_titles:
-                        default_final_title = suggested_titles[0]
-                    if not default_final_title and selected_oeuvre.get('Titre_Original'):
-                        default_final_title = selected_oeuvre.get('Titre_Original')
-
-                    final_title = st.text_input("Titre final de l'œuvre :", value=default_final_title)
-                    final_summary = st.text_area("Résumé final (pour la publication) :", value=selected_oeuvre.get('Resume_Suggere', ''))
-                    final_tags = st.text_input("Tags finaux (séparés par des virgules) :", value=selected_oeuvre.get('Tags_Suggérés', ''))
-                    final_manual_tags = st.text_input("Tags Manuels additionnels :", value=selected_oeuvre.get('Tags_Manuels', ''))
-
-                    platform_options = ["Patreon", "Kindle", "Sites de niche", "Autre", "Non publié"]
-                    current_platforms = selected_oeuvre.get('Plateforme_Publication', '').split(',') if isinstance(selected_oeuvre.get('Plateforme_Publication'), str) and selected_oeuvre.get('Plateforme_Publication').strip() else []
-                    default_selected_platforms = [p.strip() for p in current_platforms if p.strip() in platform_options]
-                    if not default_selected_platforms and "Non publié" in platform_options:
-                        default_selected_platforms = ["Non publié"]
-
-                    final_platform = st.multiselect("Plateforme(s) de Publication :", platform_options, default=default_selected_platforms)
-
-                    status_options = ["Brouillon", "Prêt à Publier", "Publié"]
-                    default_status_index = status_options.index(selected_oeuvre.get('Statut_Publication', 'Brouillon')) if selected_oeuvre.get('Statut_Publication', 'Brouillon') in status_options else 0
-                    final_status = st.selectbox("Statut de Publication :", status_options, index=default_status_index)
-                    final_notes = st.text_area("Notes de l'éditeur :", value=selected_oeuvre.get('Notes_Editeur', ''))
-
-                    if st.button("Enregistrer le Kit de Lancement Final", key="save_launch_kit_btn"):
-                        updates = {
-                            'Titre_Optimise': final_title,
-                            'Resume_Suggere': final_summary,
-                            'Tags_Suggérés': final_tags,
-                            'Tags_Manuels': final_manual_tags,
-                            'Plateforme_Publication': ", ".join(final_platform),
-                            'Statut_Publication': final_status,
-                            'Notes_Editeur': final_notes
+                            st.error("Échec de la sauvegarde des paroles.")
+           
+            elif save_lyrics_option == "Dans un Morceau Existant (Google Sheet)":
+                morceaux_df = sc.get_all_morceaux()
+                if not morceaux_df.empty:
+                    morceau_to_update_id = st.selectbox(
+                        "Sélectionnez le morceau à mettre à jour",
+                        morceaux_df['ID_Morceau'].tolist(),
+                        format_func=lambda x: f"{x} - {morceaux_df[morceaux_df['ID_Morceau'] == x]['Titre_Morceau'].iloc[0]}",
+                        key="update_existing_morceau_lyrics_id"
+                    )
+                    if st.button("Mettre à jour les Paroles du Morceau Existant"):
+                        morceau_data_update = {
+                            'Prompt_Generation_Paroles': st.session_state.generated_lyrics,
+                            'Statut_Production': 'Paroles Générées'
                         }
-                        if sheets_connector.update_oeuvre_in_sheet(selected_oeuvre['ID_Oeuvre'], updates):
-                            sheets_connector.load_data_from_sheet.clear()
-                            st.rerun()
-
-                with tab_edit:
-                    st.subheader("Édition Manuelle des Données")
-                    st.write("⚠️ Utilisez cette section pour des modifications directes sur les données de l'œuvre. Soyez prudent. Notez que cette édition modifie la ligne dans le Google Sheet.")
-
-                    editable_df = pd.DataFrame([selected_oeuvre.to_dict()])
-                    edited_data = st.data_editor(editable_df, num_rows="fixed", hide_index=True)
-
-                    if st.button("Appliquer les Modifications Manuelles", key="apply_manual_edit_btn"):
-                        if edited_data is not None and not edited_data.empty:
-                            row_to_update = edited_data.iloc[0]
-                            updates = {col: row_to_update[col] if pd.notna(row_to_update[col]) else '' for col in edited_data.columns if col != 'ID_Oeuvre'}
-
-                            if 'Numero_Tome' in updates:
-                                try:
-                                    updates['Numero_Tome'] = int(updates['Numero_Tome']) if str(updates['Numero_Tome']).strip() != '' else ''
-                                except ValueError:
-                                    updates['Numero_Tome'] = ''
-
-                            if sheets_connector.update_oeuvre_in_sheet(selected_oeuvre['ID_Oeuvre'], updates):
-                                sheets_connector.load_data_from_sheet.clear()
-                                st.rerun()
+                        if sc.update_morceau_generes(morceau_to_update_id, morceau_data_update):
+                            st.success(f"Paroles mises à jour pour le morceau '{morceau_to_update_id}' dans Google Sheet !")
+                            del st.session_state['generated_lyrics']
                         else:
-                            st.warning("Aucune modification à appliquer.")
+                            st.error("Échec de la mise à jour des paroles.")
+                else:
+                    st.info("Aucun morceau existant dans votre Google Sheet.")
 
-                with tab_delete:
-                    st.subheader("Supprimer l'Œuvre")
-                    st.warning("ATTENTION : La suppression d'une œuvre est **irréversible**.")
-                    if st.button(f"Supprimer l'Œuvre '{selected_oeuvre['Titre_Original']}'", key="delete_oeuvre_btn"):
-                        show_confirm_modal(selected_oeuvre['ID_Oeuvre'], "oeuvre")
+            elif save_lyrics_option == "Dans un fichier local":
+                filename = st.text_input("Nom du fichier local (.txt)", value=f"paroles_{st.session_state.lyrics_genre_musical}_{datetime.now().strftime('%Y%m%d%H%M%S')}.txt", key="local_lyrics_filename")
+                if st.button("Sauvegarder les Paroles en local"):
+                    file_path = os.path.join(GENERATED_TEXTS_DIR, filename)
+                    try:
+                        with open(file_path, "w", encoding="utf-8") as f:
+                            f.write(st.session_state.generated_lyrics)
+                        st.success(f"Paroles sauvegardées localement: {file_path}")
+                        del st.session_state['generated_lyrics']
+                    except Exception as e:
+                        st.error(f"Erreur lors de la sauvegarde locale des paroles: {e}")
 
-            else:
-                st.info("Sélectionnez une œuvre valide ci-dessus pour accéder à l'atelier.")
-        else:
-            st.info("Sélectionnez une œuvre valide ci-dessus pour accéder à l'atelier.")
-    else:
-        st.info("Aucune œuvre disponible pour l'Atelier. Générez-en une via le 'Générateur de Texte' ou ajoutez-en manuellement dans Google Sheets.")
+    st.markdown("---")
 
+    # --- Formulaire de Génération de Prompt Audio ---
+    if content_type == "Prompt Audio (pour SUNO)":
+        st.subheader("Générer un Prompt Audio Détaillé (pour SUNO)")
+        with st.form("audio_prompt_generator_form"):
+            col1, col2 = st.columns(2)
+            with col1:
+                st.selectbox("Genre Musical", sc.get_all_styles_musicaux()['ID_Style_Musical'].tolist(), key="audio_genre_musical")
+                st.selectbox("Mood Principal", sc.get_all_moods()['ID_Mood'].tolist(), key="audio_mood_principal")
+                st.text_input("Durée Estimée (ex: 03:30)", key="audio_duree_estimee")
+                st.text_input("Instrumentation Principale (ex: Piano, Violoncelle, Pads)", key="audio_instrumentation_principale")
+            with col2:
+                st.text_input("Ambiance Sonore Spécifique", key="audio_ambiance_sonore_specifique")
+                st.text_input("Effets de Production Dominants (ex: Réverbération luxuriante)", key="audio_effets_production_dominants")
+                st.selectbox("Type de Voix Désirée", ["N/A", "Chant Masculin", "Chant Féminin", "Spoken Word", "Chœur", "Voix Robotique"], key="audio_type_voix_desiree")
+                st.text_input("Style Vocal Désiré (ex: Lyrique, Râpeux)", key="audio_style_vocal_desire")
+                st.text_input("Caractère de la Voix (ex: Puissant, Doux)", key="audio_caractere_voix_desire")
+                st.selectbox("Structure de Chanson", ["N/A"] + sc.get_all_structures_song()['ID_Structure'].tolist(), key="audio_structure_song")
 
-elif page == "Générateur de Tendances Marché":
-    st.header("📈 Générateur de Tendances Marché : L'Oracle Prédit le Succès")
-    st.write("Générez des données simulées pour la veille stratégique. Ces données rempliront l'onglet 'Tendances_Marche' de votre Google Sheet.")
-    st.info("💡 **Performance :** L'opération de génération des tendances prend quelques secondes. Streamlit affichera un indicateur de chargement.")
+            submit_audio_prompt_button = st.form_submit_button("Générer le Prompt Audio")
 
-    with st.form("generate_trends_form"):
-        st.subheader("Paramètres de Simulation des Tendances :")
-        num_entries = st.slider("Nombre d'entrées de tendance à générer :", min_value=1, max_value=10, value=3)
-        start_date_obj = st.date_input("Date de début des tendances :", value=datetime.now() - timedelta(days=90))
-        start_date_str = start_date_obj.strftime("%Y-%m-%d")
+            if submit_audio_prompt_button:
+                with st.spinner("L'Oracle génère le prompt audio..."):
+                    generated_audio_prompt = go.generate_audio_prompt(
+                        genre_musical=st.session_state.audio_genre_musical,
+                        mood_principal=st.session_state.audio_mood_principal,
+                        duree_estimee=st.session_state.audio_duree_estimee,
+                        instrumentation_principale=st.session_state.audio_instrumentation_principale,
+                        ambiance_sonore_specifique=st.session_state.audio_ambiance_sonore_specifique,
+                        effets_production_dominants=st.session_state.audio_effets_production_dominants,
+                        type_voix_desiree=st.session_state.audio_type_voix_desiree,
+                        style_vocal_desire=st.session_state.audio_style_vocal_desire,
+                        caractere_voix_desire=st.session_state.audio_caractere_voix_desire,
+                        structure_song=st.session_state.audio_structure_song
+                    )
+                    st.session_state['generated_audio_prompt'] = generated_audio_prompt
+                    st.success("Prompt Audio généré avec succès !")
 
-        overall_sentiment = st.selectbox("Sentiment général du marché :", ["En forte croissance", "En croissance modérée", "Stable", "En léger déclin", "En fort déclin"])
-        dominant_genres_input = st.text_input("Genres dominants à prioriser (séparés par virgules) :", value="cyberpunk, fantasy érotique, romance historique")
-        specific_kinks_input = st.text_input("Kinks/Thèmes spécifiques à inclure (séparés par virgules) :", value="bdsm, inceste, tabou, monstergirl")
+        if 'generated_audio_prompt' in st.session_state and st.session_state.generated_audio_prompt:
+            st.markdown("---")
+            st.subheader("Prompt Audio Généré (pour SUNO ou autre)")
+            st.text_area("Copiez ce prompt pour votre générateur audio :", st.session_state.generated_audio_prompt, height=200, key="displayed_generated_audio_prompt")
 
-        submitted_trends = st.form_submit_button("Générer & Sauvegarder les Tendances Marché")
-
-        if submitted_trends:
-            dominant_genres = [g.strip() for g in dominant_genres_input.split(',') if g.strip()]
-            specific_kinks = [k.strip() for k in specific_kinks_input.split(',') if k.strip()]
-
-            with st.spinner("L'Oracle génère les tendances du marché..."):
-                generated_trends_data = gemini_oracle.generate_simulated_market_trends(
-                    num_entries, start_date_str, overall_sentiment, dominant_genres, specific_kinks
+            # Option de sauvegarde du prompt audio pour un morceau existant
+            morceaux_df = sc.get_all_morceaux()
+            if not morceaux_df.empty:
+                morceau_to_update_audio_id = st.selectbox(
+                    "Liez ce prompt à un morceau existant (Google Sheet) :",
+                    morceaux_df['ID_Morceau'].tolist(),
+                    format_func=lambda x: f"{x} - {morceaux_df[morceaux_df['ID_Morceau'] == x]['Titre_Morceau'].iloc[0]}",
+                    key="update_existing_morceau_audio_prompt_id"
                 )
-
-            if generated_trends_data:
-                st.subheader("Tendances Générées :")
-                st.dataframe(pd.DataFrame(generated_trends_data))
-
-                if sheets_connector.append_rows_to_sheet(config.WORKSHEET_NAME_TENDANCES, generated_trends_data):
-                    st.success("Tendances marché sauvegardées avec succès dans Google Sheets !")
-                    sheets_connector.load_data_from_sheet.clear()
-                else:
-                    st.error("Échec de la sauvegarde des tendances marché dans Google Sheets.")
-            else:
-                st.warning("Aucune tendance marché générée. Veuillez ajuster les paramètres.")
-
-
-elif page == "Générateur de Performances":
-    st.header("📊 Générateur de Performances : L'Oracle Chiffre le Succès")
-    st.write("Générez des données de performance mensuelle simulées pour vos œuvres. Ces données rempliront l'onglet 'Performance_Mensuelle' de votre Google Sheet.")
-    st.info("💡 **Performance :** L'opération de génération des performances prend quelques secondes. Streamlit affichera un indicateur de chargement.")
-
-
-    df_oeuvres = sheets_connector.load_data_from_sheet(config.WORKSHEET_NAME_OEUVRES)
-
-    if df_oeuvres.empty:
-        st.info("Aucune œuvre disponible pour générer des performances. Créez des œuvres d'abord.")
-    else:
-        oeuvre_ids_list = df_oeuvres['ID_Oeuvre'].tolist()
-        oeuvre_titles_map = df_oeuvres.set_index('ID_Oeuvre')['Titre_Original'].to_dict()
-
-        with st.form("generate_performance_form"):
-            st.subheader("Paramètres de Simulation des Performances :")
-
-            selected_oeuvres_for_perf_options = [f"{oid} - {oeuvre_titles_map.get(oid, 'Titre Inconnu')}" for oid in oeuvre_ids_list]
-            selected_oeuvres_for_perf = st.multiselect(
-                "Sélectionnez les œuvres pour lesquelles générer des performances :",
-                options=selected_oeuvres_for_perf_options,
-                default=selected_oeuvres_for_perf_options
-            )
-            selected_ids_for_perf = [s.split(' - ')[0] for s in selected_oeuvres_for_perf]
-
-            num_months = st.slider("Nombre de mois à simuler :", min_value=1, max_value=12, value=3)
-            start_month_year_obj = datetime.now().replace(day=1) - timedelta(days=90)
-            start_month_year = st.date_input("Mois de début (performance) :", value=start_month_year_obj).strftime("%m-%Y")
-
-            base_revenue_input = st.number_input("Revenu de base par mois et par œuvre (€) :", min_value=10.0, max_value=1000.0, value=50.0, step=10.0)
-            growth_factor_input = st.slider("Facteur de croissance mensuelle (%) :", min_value=-5.0, max_value=10.0, value=2.0, step=0.5) / 100
-
-            submitted_performance = st.form_submit_button("Générer & Sauvegarder les Performances")
-
-            if submitted_performance:
-                if not selected_ids_for_perf:
-                    st.warning("Veuillez sélectionner au moins une œuvre pour générer des performances.")
-                else:
-                    with st.spinner("L'Oracle génère les données de performance..."):
-                        generated_performance_data = gemini_oracle.generate_simulated_performance_data(
-                            selected_ids_for_perf, num_months, start_month_year,
-                            base_revenue=base_revenue_input, growth_factor=growth_factor_input
-                        )
-
-                    if generated_performance_data:
-                        st.subheader("Performances Générées :")
-                        st.dataframe(pd.DataFrame(generated_performance_data))
-
-                        if sheets_connector.append_rows_to_sheet(config.WORKSHEET_NAME_PERFORMANCE, generated_performance_data):
-                            st.success("Performances sauvegardées avec succès dans Google Sheets !")
-                            sheets_connector.load_data_from_sheet.clear()
-                        else:
-                            st.error("Échec de la sauvegarde des performances dans Google Sheets.")
+                if st.button("Mettre à jour le Prompt Audio du Morceau Existant"):
+                    morceau_data_update = {
+                        'Prompt_Generation_Audio': st.session_state.generated_audio_prompt,
+                        'Statut_Production': 'Prompt Audio Généré'
+                    }
+                    if sc.update_morceau_generes(morceau_to_update_audio_id, morceau_data_update):
+                        st.success(f"Prompt Audio mis à jour pour le morceau '{morceau_to_update_audio_id}' !")
+                        del st.session_state['generated_audio_prompt']
                     else:
-                        st.warning("Aucune performance générée. Veuillez ajuster les paramètres.")
-
-
-elif page == "Veille Stratégique":
-    st.header("📊 Veille Stratégique : L'Oracle du Marché")
-    st.write("Cette page affiche les tendances du marché, les mots-clés et les niches les plus populaires, basées sur vos données saisies ou générées.")
-
-    df_tendances = sheets_connector.load_data_from_sheet(config.WORKSHEET_NAME_TENDANCES)
-
-    if not df_tendances.empty:
-        st.subheader("Données Brutes des Tendances du Marché")
-        st.dataframe(df_tendances)
-
-        st.subheader("Tendances et Mots-clés Clés")
-
-        if 'Popularite_Score' in df_tendances.columns and 'Niche_Identifiee' in df_tendances.columns and 'Competition_Niveau' in df_tendances.columns:
-            df_tendances['Popularite_Score'] = pd.to_numeric(df_tendances['Popularite_Score'], errors='coerce').fillna(0)
-            chart_niches = alt.Chart(df_tendances).mark_bar().encode(
-                x=alt.X('Niche_Identifiee', sort='-y', title='Niche Identifiée'),
-                y=alt.Y('Popularite_Score', title='Score de Popularité'),
-                color=alt.Color('Competition_Niveau', title='Niveau de Compétition'),
-                tooltip=['Niche_Identifiee', 'Popularite_Score', 'Competition_Niveau']
-            ).properties(
-                    title='Popularité des Niches par Niveau de Compétition'
-            ).interactive()
-            st.altair_chart(chart_niches, use_container_width=True)
-
-            st.write("Top 3 des Niches par Popularité :")
-            top_niches = df_tendances.sort_values(by='Popularite_Score', ascending=False).head(3)
-            st.dataframe(top_niches[['Niche_Identifiee', 'Popularite_Score', 'Competition_Niveau']])
-
-        if 'Mots_Cles_Associes' in df_tendances.columns:
-            all_keywords = df_tendances['Mots_Cles_Associes'].dropna().str.split(', ').explode()
-            if not all_keywords.empty:
-                st.write("Mots-clés les plus fréquents :")
-                keyword_counts = all_keywords.value_counts().reset_index()
-                keyword_counts.columns = ['Keyword', 'Count']
-                chart_keywords = alt.Chart(keyword_counts.head(10)).mark_bar().encode(
-                    x=alt.X('Count', title='Fréquence'),
-                    y=alt.Y('Keyword', sort='-x', title='Mot-clé'),
-                    tooltip=['Keyword', 'Count']
-                ).properties(
-                    title='Top 10 des Mots-clés les Plus Fréquents'
-                ).interactive()
-                st.altair_chart(chart_keywords, use_container_width=True)
-                st.dataframe(keyword_counts.head(10))
+                        st.error("Échec de la mise à jour du prompt audio.")
             else:
-                st.info("Aucun mot-clé associé trouvé.")
+                st.info("Aucun morceau existant pour lier le prompt audio.")
 
-        insights = []
-        if 'Popularite_Score' in df_tendances.columns and 'Niche_Identifiee' in df_tendances.columns:
-            top_niches_data = df_tendances.sort_values(by='Popularite_Score', ascending=False).head(1)
-            if not top_niches_data.empty:
-                insights.append(f"La niche la plus populaire est **{top_niches_data.iloc[0]['Niche_Identifiee']}** (Score: {top_niches_data.iloc[0]['Popularite_Score']}).")
+    st.markdown("---")
 
-        if 'Mots_Cles_Associes' in df_tendances.columns:
-            all_keywords = df_tendances['Mots_Cles_Associes'].dropna().str.split(', ').explode()
-            if not all_keywords.empty:
-                trending_keywords = all_keywords.value_counts().head(3).index.tolist()
-                insights.append(f"Les mots-clés en vogue sont : **{', '.join(trending_keywords)}**.")
+    # --- Formulaire de Génération d'Idées de Titres ---
+    if content_type == "Idées de Titres":
+        st.subheader("Générer des Idées de Titres de Chansons")
+        with st.form("title_generator_form"):
+            st.selectbox("Thème Principal", sc.get_all_themes()['ID_Theme'].tolist(), key="title_theme_principal")
+            st.selectbox("Genre Musical", sc.get_all_styles_musicaux()['ID_Style_Musical'].tolist(), key="title_genre_musical")
+            st.text_area("Extrait de paroles (optionnel, pour inspiration)", key="title_paroles_extrait")
+            submit_title_button = st.form_submit_button("Générer les Titres")
 
-        if insights:
-            st.markdown(f"#### Conseil de l'Oracle :")
-            for insight in insights:
-                st.write(f"- {insight}")
+            if submit_title_button:
+                with st.spinner("L'Oracle brainstorme des titres..."):
+                    generated_titles = go.generate_title_ideas(
+                        theme_principal=st.session_state.title_theme_principal,
+                        genre_musical=st.session_state.title_genre_musical,
+                        paroles_extrait=st.session_state.title_paroles_extrait
+                    )
+                    st.session_state['generated_titles'] = generated_titles
+                    st.success("Idées de titres générées avec succès !")
+       
+        if 'generated_titles' in st.session_state and st.session_state.generated_titles:
+            st.markdown("---")
+            st.subheader("Idées de Titres Générées")
+            st.text_area("Copiez les titres ici :", st.session_state.generated_titles, height=250, key="displayed_generated_titles")
+
+    st.markdown("---")
+
+    # --- Formulaire de Génération de Description Marketing ---
+    if content_type == "Description Marketing":
+        st.subheader("Générer une Description Marketing")
+        with st.form("marketing_copy_form"):
+            col1, col2 = st.columns(2)
+            with col1:
+                st.text_input("Titre du Morceau/Album", key="marketing_titre_morceau")
+                st.selectbox("Genre Musical", sc.get_all_styles_musicaux()['ID_Style_Musical'].tolist(), key="marketing_genre_musical")
+            with col2:
+                st.selectbox("Mood Principal", sc.get_all_moods()['ID_Mood'].tolist(), key="marketing_mood_principal")
+                st.selectbox("Public Cible", sc.get_all_public_cible()['ID_Public'].tolist(), key="marketing_public_cible")
+            st.text_input("Point Fort Principal (ex: 'son unique', 'message profond')", key="marketing_point_fort")
+            submit_marketing_button = st.form_submit_button("Générer la Description Marketing")
+
+            if submit_marketing_button:
+                with st.spinner("L'Oracle rédige la description..."):
+                    generated_marketing_copy = go.generate_marketing_copy(
+                        titre_morceau=st.session_state.marketing_titre_morceau,
+                        genre_musical=st.session_state.marketing_genre_musical,
+                        mood_principal=st.session_state.marketing_mood_principal,
+                        public_cible=st.session_state.marketing_public_cible,
+                        point_fort_principal=st.session_state.marketing_point_fort
+                    )
+                    st.session_state['generated_marketing_copy'] = generated_marketing_copy
+                    st.success("Description marketing générée avec succès !")
+       
+        if 'generated_marketing_copy' in st.session_state and st.session_state.generated_marketing_copy:
+            st.markdown("---")
+            st.subheader("Description Marketing Générée")
+            st.text_area("Copiez la description ici :", st.session_state.generated_marketing_copy, height=150, key="displayed_generated_marketing_copy")
+
+    st.markdown("---")
+
+    # --- Formulaire de Génération de Prompt Pochette d'Album ---
+    if content_type == "Prompt Pochette d'Album":
+        st.subheader("Générer un Prompt pour Pochette d'Album (Midjourney/DALL-E)")
+        with st.form("album_art_prompt_form"):
+            st.text_input("Nom de l'Album", key="album_art_nom_album")
+            st.selectbox("Genre Dominant de l'Album", sc.get_all_styles_musicaux()['ID_Style_Musical'].tolist(), key="album_art_genre_dominant")
+            st.text_area("Description du Concept de l'Album", key="album_art_description_concept")
+            st.selectbox("Mood Principal Visuel", sc.get_all_moods()['ID_Mood'].tolist(), key="album_art_mood_principal")
+            st.text_input("Mots-clés Visuels Supplémentaires (ex: 'couleurs vives', 'style néon', 'minimaliste')", key="album_art_mots_cles_visuels")
+            submit_album_art_button = st.form_submit_button("Générer le Prompt Visuel")
+
+            if submit_album_art_button:
+                with st.spinner("L'Oracle imagine la pochette..."):
+                    generated_album_art_prompt = go.generate_album_art_prompt(
+                        nom_album=st.session_state.album_art_nom_album,
+                        genre_dominant_album=st.session_state.album_art_genre_dominant,
+                        description_concept_album=st.session_state.album_art_description_concept,
+                        mood_principal=st.session_state.album_art_mood_principal,
+                        mots_cles_visuels_suppl=st.session_state.album_art_mots_cles_visuels
+                    )
+                    st.session_state['generated_album_art_prompt'] = generated_album_art_prompt
+                    st.success("Prompt de pochette d'album généré avec succès !")
+       
+        if 'generated_album_art_prompt' in st.session_state and st.session_state.generated_album_art_prompt:
+            st.markdown("---")
+            st.subheader("Prompt de Pochette d'Album Généré")
+            st.text_area("Copiez ce prompt pour votre générateur d'images :", st.session_state.generated_album_art_prompt, height=300, key="displayed_generated_album_art_prompt") 
+
+# app.py - Suite du code
+
+# --- Page : Co-pilote Créatif (Création Musicale IA) ---
+if st.session_state['current_page'] == 'Co-pilote Créatif':
+    st.header("💡 Co-pilote Créatif de l'Oracle (Beta)")
+    st.write("Laissez l'Oracle vous accompagner en temps réel pour l'écriture de paroles, la composition harmonique ou rythmique.")
+    st.info("Cette fonctionnalité est en version Beta. Les suggestions sont basées sur votre input et le contexte défini.")
+
+    co_pilot_type = st.radio(
+        "Quel type de suggestion souhaitez-vous ?",
+        ["Suite Lyrique", "Ligne de Basse", "Prochain Accord"],
+        key="co_pilot_type_radio"
+    )
+
+    st.markdown("---")
+
+    # Contexte global pour le co-pilote
+    st.subheader("Contexte du Morceau")
+    col_ctx1, col_ctx2 = st.columns(2)
+    with col_ctx1:
+        st.selectbox("Genre Musical du morceau", sc.get_all_styles_musicaux()['ID_Style_Musical'].tolist(), key="copilot_genre_musical")
+        st.selectbox("Mood du morceau", sc.get_all_moods()['ID_Mood'].tolist(), key="copilot_mood_principal")
+    with col_ctx2:
+        st.selectbox("Thème Principal du morceau", sc.get_all_themes()['ID_Theme'].tolist(), key="copilot_theme_principal")
+        st.text_input("Mots-clés contextuels (ex: 'solitude urbaine', 'rythme entraînant')", key="copilot_context_keywords")
+   
+    # Construction du contexte pour l'IA
+    full_context = f"Genre: {st.session_state.copilot_genre_musical}, Mood: {st.session_state.copilot_mood_principal}, Thème: {st.session_state.copilot_theme_principal}, Mots-clés: {st.session_state.copilot_context_keywords}"
+
+    st.markdown("---")
+
+    # --- Formulaire pour Suite Lyrique ---
+    if co_pilot_type == "Suite Lyrique":
+        st.subheader("Suggérer la Suite des Paroles")
+        with st.form("copilot_lyrics_form"):
+            st.text_area("Commencez à écrire vos paroles ici :", key="copilot_current_lyrics_input", height=100)
+            submit_copilot_lyrics = st.form_submit_button("Suggérer la suite")
+
+            if submit_copilot_lyrics:
+                if st.session_state.copilot_current_lyrics_input:
+                    with st.spinner("L'Oracle brainstorme la suite des paroles..."):
+                        suggestion = go.copilot_creative_suggestion(
+                            current_input=st.session_state.copilot_current_lyrics_input,
+                            context=full_context,
+                            type_suggestion="suite_lyrique"
+                        )
+                        st.session_state['copilot_lyrics_suggestion'] = suggestion
+                        st.success("Suggestion de paroles prête !")
+                else:
+                    st.warning("Veuillez entrer du texte pour obtenir une suggestion de suite.")
+
+        if 'copilot_lyrics_suggestion' in st.session_state and st.session_state.copilot_lyrics_suggestion:
+            st.markdown("---")
+            st.subheader("Suggestion de Paroles")
+            st.text_area("Voici la suggestion du Co-pilote :", st.session_state.copilot_lyrics_suggestion, height=200)
+            if st.button("Utiliser cette suggestion", key="use_lyrics_suggestion"):
+                st.session_state.copilot_current_lyrics_input += "\n" + st.session_state.copilot_lyrics_suggestion
+                st.experimental_rerun() # Recharger pour afficher la mise à jour
+
+
+    # --- Formulaire pour Ligne de Basse ---
+    elif co_pilot_type == "Ligne de Basse":
+        st.subheader("Suggérer une Ligne de Basse")
+        with st.form("copilot_bass_form"):
+            st.text_input("Décrivez le groove ou la progression d'accords actuelle (ex: 'groove funk sur Am - G - C - F')", key="copilot_current_bass_input")
+            submit_copilot_bass = st.form_submit_button("Suggérer une ligne de basse")
+
+            if submit_copilot_bass:
+                if st.session_state.copilot_current_bass_input:
+                    with st.spinner("L'Oracle imagine la ligne de basse..."):
+                        suggestion = go.copilot_creative_suggestion(
+                            current_input=st.session_state.copilot_current_bass_input,
+                            context=full_context,
+                            type_suggestion="ligne_basse"
+                        )
+                        st.session_state['copilot_bass_suggestion'] = suggestion
+                        st.success("Suggestion de ligne de basse prête !")
+                else:
+                    st.warning("Veuillez décrire le contexte musical pour la ligne de basse.")
+
+        if 'copilot_bass_suggestion' in st.session_state and st.session_state.copilot_bass_suggestion:
+            st.markdown("---")
+            st.subheader("Suggestion de Ligne de Basse")
+            st.text_area("Voici la suggestion du Co-pilote :", st.session_state.copilot_bass_suggestion, height=150)
+
+
+    # --- Formulaire pour Prochain Accord ---
+    elif co_pilot_type == "Prochain Accord":
+        st.subheader("Suggérer le Prochain Accord")
+        with st.form("copilot_chord_form"):
+            st.text_input("Entrez l'accord actuel (ex: 'Cmaj7', 'Am')", key="copilot_current_chord_input")
+            st.text_input("Tonalité du morceau (ex: 'C Majeur', 'A mineur')", key="copilot_tonalite_input")
+            submit_copilot_chord = st.form_submit_button("Suggérer le prochain accord")
+
+            if submit_copilot_chord:
+                if st.session_state.copilot_current_chord_input and st.session_state.copilot_tonalite_input:
+                    chord_context = f"Tonalité: {st.session_state.copilot_tonalite_input}, Genre: {st.session_state.copilot_genre_musical}, Mood: {st.session_state.copilot_mood_principal}"
+                    with st.spinner("L'Oracle réfléchit aux harmonies..."):
+                        suggestion = go.copilot_creative_suggestion(
+                            current_input=st.session_state.copilot_current_chord_input,
+                            context=chord_context,
+                            type_suggestion="prochain_accord"
+                        )
+                        st.session_state['copilot_chord_suggestion'] = suggestion
+                        st.success("Suggestion d'accords prête !")
+                else:
+                    st.warning("Veuillez entrer l'accord actuel et la tonalité.")
+
+        if 'copilot_chord_suggestion' in st.session_state and st.session_state.copilot_chord_suggestion:
+            st.markdown("---")
+            st.subheader("Suggestions de Prochains Accords")
+            st.text_area("Voici les options du Co-pilote :", st.session_state.copilot_chord_suggestion, height=200) 
+
+# app.py - Suite du code
+
+# --- Page : Création Multimodale (Création Musicale IA) ---
+if st.session_state['current_page'] == 'Création Multimodale':
+    st.header("🎬 Création Multimodale Synchronisée")
+    st.write("L'Oracle génère des prompts cohérents pour vos paroles, votre audio (pour SUNO) et vos visuels (pour Midjourney/DALL-E), assurant une harmonie parfaite de votre œuvre.")
+
+    with st.form("multimodal_creation_form"):
+        col_multi1, col_multi2 = st.columns(2)
+        with col_multi1:
+            st.selectbox("Thème Principal", sc.get_all_themes()['ID_Theme'].tolist(), key="multi_main_theme")
+            st.selectbox("Genre Musical Général", sc.get_all_styles_musicaux()['ID_Style_Musical'].tolist(), key="multi_main_genre")
+        with col_multi2:
+            st.selectbox("Mood Général", sc.get_all_moods()['ID_Mood'].tolist(), key="multi_main_mood")
+            st.selectbox("Artiste IA Associé", sc.get_all_artistes_ia()['ID_Artiste_IA'].tolist(), key="multi_artiste_ia_name")
+       
+        st.text_input("Longueur Estimée du Morceau (ex: '03:45')", key="multi_longueur_morceau")
+
+        submit_multimodal_button = st.form_submit_button("Générer les Prompts Multimodaux")
+
+        if submit_multimodal_button:
+            with st.spinner("L'Oracle orchestre votre création multimodale..."):
+                multimodal_prompts = go.generate_multimodal_content_prompts(
+                    main_theme=st.session_state.multi_main_theme,
+                    main_genre=st.session_state.multi_main_genre,
+                    main_mood=st.session_state.multi_main_mood,
+                    longueur_morceau=st.session_state.multi_longueur_morceau,
+                    artiste_ia_name=st.session_state.multi_artiste_ia_name
+                )
+                st.session_state['multimodal_prompts'] = multimodal_prompts
+                st.success("Prompts multimodaux générés avec succès !")
+
+    if 'multimodal_prompts' in st.session_state and st.session_state.multimodal_prompts:
+        st.markdown("---")
+        st.subheader("Prompts Multimodaux Générés")
+       
+        st.write("### Prompt pour les Paroles de Chanson :")
+        st.text_area("Copiez pour votre parolier ou pour affiner :", st.session_state.multimodal_prompts.get("paroles_prompt", ""), height=300, key="multi_lyrics_output")
+
+        st.write("### Prompt pour la Génération Audio (pour SUNO) :")
+        st.text_area("Copiez pour SUNO ou votre générateur audio :", st.session_state.multimodal_prompts.get("audio_suno_prompt", ""), height=200, key="multi_audio_output")
+
+        st.write("### Prompt pour l'Image de Pochette (Midjourney/DALL-E) :")
+        st.text_area("Copiez pour votre générateur d'images :", st.session_state.multimodal_prompts.get("image_prompt", ""), height=250, key="multi_image_output") 
+
+# app.py - Suite du code
+
+# --- Page : Mes Morceaux (Gestion du Sanctuaire) ---
+if st.session_state['current_page'] == 'Mes Morceaux':
+    st.header("🎶 Mes Morceaux Générés")
+    st.write("Gérez et consultez toutes vos créations musicales, qu'elles soient entièrement générées par l'IA ou co-créées.")
+
+    morceaux_df = sc.get_all_morceaux()
+   
+    tab1, tab2, tab3 = st.tabs(["Voir/Rechercher Morceaux", "Ajouter un Nouveau Morceau", "Mettre à Jour/Supprimer Morceau"])
+
+    with tab1:
+        st.subheader("Voir et Rechercher des Morceaux")
+        if not morceaux_df.empty:
+            # Recherche simple
+            search_query = st.text_input("Rechercher par titre, genre ou mots-clés", key="search_morceaux")
+            if search_query:
+                filtered_df = morceaux_df[morceaux_df.apply(lambda row: search_query.lower() in row.astype(str).str.lower().to_string(), axis=1)]
+            else:
+                filtered_df = morceaux_df
+
+            # Affichage avec formatage
+            display_dataframe(ut.format_dataframe_for_display(filtered_df), key="morceaux_display")
         else:
-            st.info("Pas assez de données pour générer des conseils de l'Oracle.")
+            st.info("Aucun morceau enregistré pour le moment.")
+
+    with tab2:
+        st.subheader("Ajouter un Nouveau Morceau")
+        with st.form("add_morceau_form"):
+            col_add1, col_add2 = st.columns(2)
+            with col_add1:
+                new_titre = st.text_input("Titre du Morceau", key="add_morceau_titre")
+                new_statut = st.selectbox("Statut de Production", ["Idée", "Paroles Générées", "Prompt Audio Généré", "Audio Généré", "Mix/Master", "Finalisé", "Publié"], key="add_morceau_statut")
+                new_duree = st.text_input("Durée Estimée (ex: 03:45)", key="add_morceau_duree")
+               
+                st.selectbox("Style Musical Principal", [''] + sc.get_all_styles_musicaux()['ID_Style_Musical'].tolist(), key="add_morceau_style_musical")
+                st.selectbox("Mood Principal", [''] + sc.get_all_moods()['ID_Mood'].tolist(), key="add_morceau_mood_principal")
+                st.selectbox("Thème Principal Lyrique", [''] + sc.get_all_themes()['ID_Theme'].tolist(), key="add_morceau_theme_lyrique")
+                st.selectbox("Structure de Chanson", [''] + sc.get_all_structures_song()['ID_Structure'].tolist(), key="add_morceau_structure_chanson")
+                st.text_area("Mots-clés de Génération (séparés par des virgules)", key="add_morceau_mots_cles_gen")
+                st.selectbox("Langue des Paroles", [''] + ["Français", "Anglais", "Espagnol"], key="add_morceau_langue_paroles")
+                st.selectbox("Niveau de Langage Paroles", [''] + ["Familier", "Courant", "Soutenu", "Poétique", "Argotique", "Technique"], key="add_morceau_niveau_langage")
+                st.selectbox("Imagerie Texte", [''] + ["Forte et Descriptive", "Métaphorique", "Abstraite", "Concrète"], key="add_morceau_imagerie_texte")
+           
+            with col_add2:
+                new_artiste_ia = st.selectbox("Artiste IA Associé", [''] + sc.get_all_artistes_ia()['ID_Artiste_IA'].tolist(), key="add_morceau_artiste_ia")
+                new_album_associe = st.selectbox("Album Associé", [''] + sc.get_all_albums()['ID_Album'].tolist(), key="add_morceau_album_associe")
+               
+                st.text_area("Prompt Génération Audio (pour SUNO)", key="add_morceau_prompt_audio", height=150)
+                st.text_area("Prompt Génération Paroles", key="add_morceau_prompt_paroles", height=150)
+                st.text_input("Instrumentation Principale", key="add_morceau_instrumentation")
+                st.text_input("Ambiance Sonore Spécifique", key="add_morceau_ambiance_sonore")
+                st.text_input("Effets Production Dominants", key="add_morceau_effets_prod")
+                st.selectbox("Type de Voix Désirée", [''] + sc.get_all_voix_styles()['Type_Vocal_General'].unique().tolist(), key="add_morceau_type_voix")
+                st.text_input("Style Vocal Désiré", key="add_morceau_style_vocal")
+                st.text_input("Caractère Voix Désiré", key="add_morceau_caractere_voix")
+                st.text_input("Mots-clés SEO", key="add_morceau_mots_cles_seo")
+                st.text_area("Description Courte Marketing", key="add_morceau_desc_marketing", height=100)
+               
+                # --- Téléchargement de Fichiers ---
+                st.markdown("##### Téléchargement de Fichiers Locaux")
+                uploaded_audio_file = st.file_uploader("Uploader Fichier Audio (.mp3, .wav)", type=["mp3", "wav"], key="upload_audio_morceau")
+                uploaded_cover_file = st.file_uploader("Uploader Image de Cover (.jpg, .png)", type=["jpg", "png"], key="upload_cover_morceau")
+
+            submit_new_morceau = st.form_submit_button("Ajouter le Morceau")
+
+            if submit_new_morceau:
+                # Sauvegarder les fichiers uploadés
+                audio_path = ut.save_uploaded_file(uploaded_audio_file, AUDIO_CLIPS_DIR)
+                cover_path = ut.save_uploaded_file(uploaded_cover_file, SONG_COVERS_DIR)
+
+                new_morceau_data = {
+                    'Titre_Morceau': st.session_state.add_morceau_titre,
+                    'Statut_Production': st.session_state.add_morceau_statut,
+                    'Durée_Estimee': st.session_state.add_morceau_duree,
+                    'ID_Album_Associe': st.session_state.add_morceau_album_associe,
+                    'ID_Artiste_IA': st.session_state.add_morceau_artiste_ia,
+                    'Prompt_Generation_Audio': st.session_state.add_morceau_prompt_audio,
+                    'Prompt_Generation_Paroles': st.session_state.add_morceau_prompt_paroles,
+                    'ID_Style_Musical_Principal': st.session_state.add_morceau_style_musical,
+                    'ID_Style_Lyrique_Principal': st.session_state.add_morceau_theme_lyrique, # Utilise le champ theme pour le style lyrique principal
+                    'Theme_Principal_Lyrique': st.session_state.add_morceau_theme_lyrique,
+                    'Mots_Cles_Generation': st.session_state.add_morceau_mots_cles_gen,
+                    'Langue_Paroles': st.session_state.add_morceau_langue_paroles,
+                    'Niveau_Langage_Paroles': st.session_state.add_morceau_niveau_langage,
+                    'Imagerie_Texte': st.session_state.add_morceau_imagerie_texte,
+                    'Structure_Chanson_Specifique': st.session_state.add_morceau_structure_chanson,
+                    'Instrumentation_Principale': st.session_state.add_morceau_instrumentation,
+                    'Ambiance_Sonore_Specifique': st.session_state.add_morceau_ambiance_sonore,
+                    'Effets_Production_Domination': st.session_state.add_morceau_effets_prod,
+                    'Type_Voix_Desiree': st.session_state.add_morceau_type_voix,
+                    'Style_Vocal_Desire': st.session_state.add_morceau_style_vocal,
+                    'Caractere_Voix_Desire': st.session_state.add_morceau_caractere_voix,
+                    'URL_Audio_Local': audio_path if audio_path else '',
+                    'URL_Cover_Album': cover_path if cover_path else '',
+                    'URL_Video_Clip_Associe': '', # Pas d'upload direct pour les vidéos ici
+                    'Mots_Cles_SEO': st.session_state.add_morceau_mots_cles_seo,
+                    'Description_Courte_Marketing': st.session_state.add_morceau_desc_marketing
+                }
+               
+                if sc.add_morceau_generes(new_morceau_data):
+                    st.success(f"Morceau '{new_titre}' ajouté avec succès à Google Sheet !")
+                    st.experimental_rerun() # Rafraîchir pour voir les changements
+                else:
+                    st.error("Échec de l'ajout du morceau.")
+
+    with tab3:
+        st.subheader("Mettre à Jour ou Supprimer un Morceau")
+        if not morceaux_df.empty:
+            morceau_to_select = st.selectbox(
+                "Sélectionnez le Morceau à modifier/supprimer",
+                morceaux_df['ID_Morceau'].tolist(),
+                format_func=lambda x: f"{x} - {morceaux_df[morceaux_df['ID_Morceau'] == x]['Titre_Morceau'].iloc[0]}",
+                key="select_morceau_to_edit"
+            )
+           
+            if morceau_to_select:
+                selected_morceau = morceaux_df[morceaux_df['ID_Morceau'] == morceau_to_select].iloc[0]
+
+                st.markdown("---")
+                st.write(f"**Modification de :** {selected_morceau['Titre_Morceau']}")
+
+                with st.form("update_delete_morceau_form"):
+                    col_upd1, col_upd2 = st.columns(2)
+                    with col_upd1:
+                        upd_titre = st.text_input("Titre du Morceau", value=selected_morceau['Titre_Morceau'], key="upd_morceau_titre")
+                        upd_statut = st.selectbox("Statut de Production", ["Idée", "Paroles Générées", "Prompt Audio Généré", "Audio Généré", "Mix/Master", "Finalisé", "Publié"], index=["Idée", "Paroles Générées", "Prompt Audio Généré", "Audio Généré", "Mix/Master", "Finalisé", "Publié"].index(selected_morceau['Statut_Production']), key="upd_morceau_statut")
+                        upd_duree = st.text_input("Durée Estimée (ex: 03:45)", value=selected_morceau['Durée_Estimee'], key="upd_morceau_duree")
+
+                        upd_style_musical = st.selectbox("Style Musical Principal", [''] + sc.get_all_styles_musicaux()['ID_Style_Musical'].tolist(), index=([''] + sc.get_all_styles_musicaux()['ID_Style_Musical'].tolist()).index(selected_morceau['ID_Style_Musical_Principal']) if selected_morceau['ID_Style_Musical_Principal'] in ([''] + sc.get_all_styles_musicaux()['ID_Style_Musical'].tolist()) else 0, key="upd_morceau_style_musical")
+                        upd_mood_principal = st.selectbox("Mood Principal", [''] + sc.get_all_moods()['ID_Mood'].tolist(), index=([''] + sc.get_all_moods()['ID_Mood'].tolist()).index(selected_morceau['Ambiance_Sonore_Specifique']) if selected_morceau['Ambiance_Sonore_Specifique'] in ([''] + sc.get_all_moods()['ID_Mood'].tolist()) else 0, key="upd_morceau_mood_principal")
+                        upd_theme_lyrique = st.selectbox("Thème Principal Lyrique", [''] + sc.get_all_themes()['ID_Theme'].tolist(), index=([''] + sc.get_all_themes()['ID_Theme'].tolist()).index(selected_morceau['Theme_Principal_Lyrique']) if selected_morceau['Theme_Principal_Lyrique'] in ([''] + sc.get_all_themes()['ID_Theme'].tolist()) else 0, key="upd_morceau_theme_lyrique")
+                        upd_structure_chanson = st.selectbox("Structure de Chanson", [''] + sc.get_all_structures_song()['ID_Structure'].tolist(), index=([''] + sc.get_all_structures_song()['ID_Structure'].tolist()).index(selected_morceau['Structure_Chanson_Specifique']) if selected_morceau['Structure_Chanson_Specifique'] in ([''] + sc.get_all_structures_song()['ID_Structure'].tolist()) else 0, key="upd_morceau_structure_chanson")
+                        upd_mots_cles_gen = st.text_area("Mots-clés de Génération (séparés par des virgules)", value=selected_morceau['Mots_Cles_Generation'], key="upd_morceau_mots_cles_gen")
+                        upd_langue_paroles = st.selectbox("Langue des Paroles", [''] + ["Français", "Anglais", "Espagnol"], index=([''] + ["Français", "Anglais", "Espagnol"]).index(selected_morceau['Langue_Paroles']) if selected_morceau['Langue_Paroles'] in ([''] + ["Français", "Anglais", "Espagnol"]) else 0, key="upd_morceau_langue_paroles")
+                        upd_niveau_langage = st.selectbox("Niveau de Langage Paroles", [''] + ["Familier", "Courant", "Soutenu", "Poétique", "Argotique", "Technique"], index=([''] + ["Familier", "Courant", "Soutenu", "Poétique", "Argotique", "Technique"]).index(selected_morceau['Niveau_Langage_Paroles']) if selected_morceau['Niveau_Langage_Paroles'] in ([''] + ["Familier", "Courant", "Soutenu", "Poétique", "Argotique", "Technique"]) else 0, key="upd_morceau_niveau_langage")
+                        upd_imagerie_texte = st.selectbox("Imagerie Texte", [''] + ["Forte et Descriptive", "Métaphorique", "Abstraite", "Concrète"], index=([''] + ["Forte et Descriptive", "Métaphorique", "Abstraite", "Concrète"]).index(selected_morceau['Imagerie_Texte']) if selected_morceau['Imagerie_Texte'] in ([''] + ["Forte et Descriptive", "Métaphorique", "Abstraite", "Concrète"]) else 0, key="upd_morceau_imagerie_texte")
+                   
+                    with col_upd2:
+                        upd_artiste_ia = st.selectbox("Artiste IA Associé", [''] + sc.get_all_artistes_ia()['ID_Artiste_IA'].tolist(), index=([''] + sc.get_all_artistes_ia()['ID_Artiste_IA'].tolist()).index(selected_morceau['ID_Artiste_IA']) if selected_morceau['ID_Artiste_IA'] in ([''] + sc.get_all_artistes_ia()['ID_Artiste_IA'].tolist()) else 0, key="upd_morceau_artiste_ia")
+                        upd_album_associe = st.selectbox("Album Associé", [''] + sc.get_all_albums()['ID_Album'].tolist(), index=([''] + sc.get_all_albums()['ID_Album'].tolist()).index(selected_morceau['ID_Album_Associe']) if selected_morceau['ID_Album_Associe'] in ([''] + sc.get_all_albums()['ID_Album'].tolist()) else 0, key="upd_morceau_album_associe")
+                       
+                        upd_prompt_audio = st.text_area("Prompt Génération Audio (pour SUNO)", value=selected_morceau['Prompt_Generation_Audio'], height=150, key="upd_morceau_prompt_audio")
+                        upd_prompt_paroles = st.text_area("Prompt Génération Paroles", value=selected_morceau['Prompt_Generation_Paroles'], height=150, key="upd_morceau_prompt_paroles")
+                        upd_instrumentation = st.text_input("Instrumentation Principale", value=selected_morceau['Instrumentation_Principale'], key="upd_morceau_instrumentation")
+                        upd_ambiance_sonore = st.text_input("Ambiance Sonore Spécifique", value=selected_morceau['Ambiance_Sonore_Specifique'], key="upd_morceau_ambiance_sonore")
+                        upd_effets_prod = st.text_input("Effets Production Dominants", value=selected_morceau['Effets_Production_Domination'], key="upd_morceau_effets_prod")
+                        upd_type_voix = st.selectbox("Type de Voix Désirée", [''] + sc.get_all_voix_styles()['Type_Vocal_General'].unique().tolist(), index=([''] + sc.get_all_voix_styles()['Type_Vocal_General'].unique().tolist()).index(selected_morceau['Type_Voix_Desiree']) if selected_morceau['Type_Voix_Desiree'] in ([''] + sc.get_all_voix_styles()['Type_Vocal_General'].unique().tolist()) else 0, key="upd_morceau_type_voix")
+                        upd_style_vocal = st.text_input("Style Vocal Désiré", value=selected_morceau['Style_Vocal_Desire'], key="upd_morceau_style_vocal")
+                        upd_caractere_voix = st.text_input("Caractère Voix Désiré", value=selected_morceau['Caractere_Voix_Desire'], key="upd_morceau_caractere_voix")
+                        upd_mots_cles_seo = st.text_input("Mots-clés SEO", value=selected_morceau['Mots_Cles_SEO'], key="upd_morceau_mots_cles_seo")
+                        upd_desc_marketing = st.text_area("Description Courte Marketing", value=selected_morceau['Description_Courte_Marketing'], height=100, key="upd_morceau_desc_marketing")
+                       
+                        # Affichage des chemins de fichiers existants et upload pour mise à jour
+                        st.markdown("##### Fichiers Locaux Existants")
+                        if selected_morceau['URL_Audio_Local']:
+                            st.text_input("Chemin Audio Local Actuel", value=selected_morceau['URL_Audio_Local'], disabled=True, key="current_audio_path")
+                            st.audio(os.path.join(AUDIO_CLIPS_DIR, selected_morceau['URL_Audio_Local']), format="audio/mp3", start_time=0)
+                        if selected_morceau['URL_Cover_Album']:
+                            st.text_input("Chemin Cover Album Actuel", value=selected_morceau['URL_Cover_Album'], disabled=True, key="current_cover_path")
+                            st.image(os.path.join(SONG_COVERS_DIR, selected_morceau['URL_Cover_Album']), width=150)
+
+                        uploaded_audio_file_upd = st.file_uploader("Uploader Nouveau Fichier Audio (.mp3, .wav)", type=["mp3", "wav"], key="upload_audio_morceau_upd")
+                        uploaded_cover_file_upd = st.file_uploader("Uploader Nouvelle Image de Cover (.jpg, .png)", type=["jpg", "png"], key="upload_cover_morceau_upd")
+
+
+                    col_form_buttons = st.columns(2)
+                    with col_form_buttons[0]:
+                        submit_update_morceau = st.form_submit_button("Mettre à Jour le Morceau")
+                    with col_form_buttons[1]:
+                        submit_delete_morceau = st.form_submit_button("Supprimer le Morceau")
+
+                    if submit_update_morceau:
+                        audio_path_upd = selected_morceau['URL_Audio_Local']
+                        if uploaded_audio_file_upd:
+                            new_audio_path = ut.save_uploaded_file(uploaded_audio_file_upd, AUDIO_CLIPS_DIR)
+                            if new_audio_path: audio_path_upd = new_audio_path
+
+                        cover_path_upd = selected_morceau['URL_Cover_Album']
+                        if uploaded_cover_file_upd:
+                            new_cover_path = ut.save_uploaded_file(uploaded_cover_file_upd, SONG_COVERS_DIR)
+                            if new_cover_path: cover_path_upd = new_cover_path
+
+                        morceau_data_update = {
+                            'Titre_Morceau': upd_titre,
+                            'Statut_Production': upd_statut,
+                            'Durée_Estimee': upd_duree,
+                            'ID_Album_Associe': upd_album_associe,
+                            'ID_Artiste_IA': upd_artiste_ia,
+                            'Prompt_Generation_Audio': upd_prompt_audio,
+                            'Prompt_Generation_Paroles': upd_prompt_paroles,
+                            'ID_Style_Musical_Principal': upd_style_musical,
+                            'ID_Style_Lyrique_Principal': upd_theme_lyrique, # S'assure que cette colonne est correcte
+                            'Theme_Principal_Lyrique': upd_theme_lyrique,
+                            'Mots_Cles_Generation': upd_mots_cles_gen,
+                            'Langue_Paroles': upd_langue_paroles,
+                            'Niveau_Langage_Paroles': upd_niveau_langage,
+                            'Imagerie_Texte': upd_imagerie_texte,
+                            'Structure_Chanson_Specifique': upd_structure_chanson,
+                            'Instrumentation_Principale': upd_instrumentation,
+                            'Ambiance_Sonore_Specifique': upd_ambiance_sonore,
+                            'Effets_Production_Domination': upd_effets_prod,
+                            'Type_Voix_Desiree': upd_type_voix,
+                            'Style_Vocal_Desire': upd_style_vocal,
+                            'Caractere_Voix_Desire': upd_caractere_voix,
+                            'URL_Audio_Local': audio_path_upd,
+                            'URL_Cover_Album': cover_path_upd,
+                            'Mots_Cles_SEO': upd_mots_cles_seo,
+                            'Description_Courte_Marketing': upd_desc_marketing
+                        }
+                        if sc.update_morceau_generes(morceau_to_select, morceau_data_update):
+                            st.success(f"Morceau '{upd_titre}' mis à jour avec succès !")
+                            st.experimental_rerun()
+                        else:
+                            st.error("Échec de la mise à jour du morceau.")
+                   
+                    if submit_delete_morceau:
+                        if st.warning(f"Voulez-vous vraiment supprimer le morceau '{selected_morceau['Titre_Morceau']}' (ID: {morceau_to_select}) ?"):
+                            if st.button("Confirmer la suppression", key="confirm_delete_morceau"):
+                                if sc.delete_row_from_sheet(WORKSHEET_NAMES["MORCEAUX_GENERES"], 'ID_Morceau', morceau_to_select):
+                                    st.success(f"Morceau '{morceau_to_select}' supprimé avec succès !")
+                                    st.experimental_rerun()
+                                else:
+                                    st.error("Échec de la suppression du morceau.")
+        else:
+            st.info("Aucun morceau à modifier ou supprimer pour le moment.") 
+
+# app.py - Suite du code
+
+# --- Page : Lecteur Audios (Expérience Musicale Interactive) ---
+if st.session_state['current_page'] == 'Lecteur Audios':
+    st.header("🎵 Lecteur Audios de l'Architecte Ω")
+    st.write("Écoutez vos morceaux générés par l'IA, visualisez leurs paroles et marquez vos favoris. Une expérience immersive pour vos créations.")
+
+    morceaux_df = sc.get_all_morceaux()
+    paroles_existantes_df = sc.get_all_paroles_existantes()
+
+    if not morceaux_df.empty:
+        # Filtrage et sélection du morceau
+        col_select_track, col_filter_track = st.columns([0.7, 0.3])
+       
+        with col_filter_track:
+            st.subheader("Filtres")
+            filter_genre = st.selectbox("Filtrer par Genre", ['Tous'] + morceaux_df['ID_Style_Musical_Principal'].unique().tolist(), key="player_filter_genre")
+            filter_artist = st.selectbox("Filtrer par Artiste IA", ['Tous'] + morceaux_df['ID_Artiste_IA'].unique().tolist(), key="player_filter_artist")
+            filter_status = st.selectbox("Filtrer par Statut", ['Tous'] + morceaux_df['Statut_Production'].unique().tolist(), key="player_filter_status")
+
+        filtered_morceaux = morceaux_df.copy()
+        if filter_genre != 'Tous':
+            filtered_morceaux = filtered_morceaux[filtered_morceaux['ID_Style_Musical_Principal'] == filter_genre]
+        if filter_artist != 'Tous':
+            filtered_morceaux = filtered_morceaux[filtered_morceaux['ID_Artiste_IA'] == filter_artist]
+        if filter_status != 'Tous':
+            filtered_morceaux = filtered_morceaux[filtered_morceaux['Statut_Production'] == filter_status]
+
+        with col_select_track:
+            st.subheader("Sélection du Morceau")
+            if not filtered_morceaux.empty:
+                # Créer une liste de sélection formatée
+                track_options = filtered_morceaux.apply(lambda row: f"{row['Titre_Morceau']} ({row['ID_Morceau']}) - {row['ID_Artiste_IA']}", axis=1).tolist()
+                selected_track_display = st.selectbox("Choisissez un morceau à écouter", track_options, key="player_select_track")
+
+                # Récupérer l'ID du morceau sélectionné à partir du texte affiché
+                if selected_track_display:
+                    selected_morceau_id = selected_track_display.split('(')[1].split(')')[0]
+                    st.session_state['selected_morceau_id'] = selected_morceau_id
+                    current_morceau = filtered_morceaux[filtered_morceaux['ID_Morceau'] == st.session_state.selected_morceau_id].iloc[0]
+                else:
+                    current_morceau = None
+            else:
+                st.info("Aucun morceau ne correspond à vos filtres.")
+                current_morceau = None
+                st.session_state['selected_morceau_id'] = None
+
+        if current_morceau is not None:
+            st.markdown("---")
+            st.subheader(f"En cours de lecture : {current_morceau['Titre_Morceau']}")
+           
+            audio_file_path = os.path.join(AUDIO_CLIPS_DIR, current_morceau['URL_Audio_Local'])
+            cover_image_path = os.path.join(SONG_COVERS_DIR, current_morceau['URL_Cover_Album'])
+
+            col_player_info, col_player_audio = st.columns([0.3, 0.7])
+
+            with col_player_info:
+                if os.path.exists(cover_image_path) and current_morceau['URL_Cover_Album']:
+                    st.image(cover_image_path, caption=current_morceau['Titre_Morceau'], use_column_width=True)
+                else:
+                    st.image("https://via.placeholder.com/200?text=Pas+de+Cover", caption="Aucune image de cover", use_column_width=True)
+               
+                st.markdown(f"**Artiste IA :** {current_morceau['ID_Artiste_IA']}")
+                st.markdown(f"**Genre :** {current_morceau['ID_Style_Musical_Principal']}")
+                st.markdown(f"**Durée Estimée :** {current_morceau['Durée_Estimee']}")
+                st.markdown(f"**Statut :** {current_morceau['Statut_Production']}")
+
+                # --- Fonctionnalité "Favori" ---
+                # Ajoutons une colonne "Favori" dans MORCEAUX_GENERES si elle n'existe pas
+                # (Cela doit être géré dans EXPECTED_COLUMNS et le script de création de sheet)
+                # Pour l'instant, on simule ou on l'ajouterait manuellement à la feuille
+                # Option simple : simuler un bouton sans persistance avancée
+                if 'Favori' not in morceaux_df.columns:
+                     st.info("La fonctionnalité 'Favori' n'est pas encore persistante. Ajoutez une colonne 'Favori' (VRAI/FAUX) à 'MORCEAUX_GENERES'.")
+                     is_favorite = st.button("❤️ Ajouter aux Favoris (non persistant)", key="add_to_favorite_button")
+                else:
+                    # Implémenter la logique de mise à jour pour la colonne 'Favori'
+                    current_favorite_status = current_morceau.get('Favori', 'FAUX') # Assumer FAUX par défaut
+                    is_favorite_bool = ut.parse_boolean_string(str(current_favorite_status)) # Convertir la chaîne en booléen
+
+                    if is_favorite_bool:
+                        if st.button("💔 Retirer des Favoris", key="remove_from_favorite_button"):
+                            sc.update_row_in_sheet(WORKSHEET_NAMES["MORCEAUX_GENERES"], 'ID_Morceau', current_morceau['ID_Morceau'], {'Favori': 'FAUX'})
+                            st.success("Retiré des favoris.")
+                            st.experimental_rerun()
+                    else:
+                        if st.button("❤️ Ajouter aux Favoris", key="add_to_favorite_button_persistant"):
+                            sc.update_row_in_sheet(WORKSHEET_NAMES["MORCEAUX_GENERES"], 'ID_Morceau', current_morceau['ID_Morceau'], {'Favori': 'VRAI'})
+                            st.success("Ajouté aux favoris !")
+                            st.experimental_rerun()
+           
+            with col_player_audio:
+                if os.path.exists(audio_file_path) and current_morceau['URL_Audio_Local']:
+                    st.audio(audio_file_path, format="audio/mp3", start_time=0)
+                else:
+                    st.warning("Fichier audio non trouvé localement ou URL non renseignée.")
+                    if current_morceau['Prompt_Generation_Audio']:
+                        st.info("Vous pouvez utiliser le prompt audio ci-dessous avec SUNO ou un autre générateur :")
+                        st.text_area("Prompt Génération Audio", value=current_morceau['Prompt_Generation_Audio'], height=150, disabled=True)
+
+
+                # --- Affichage des Paroles Associées ---
+                st.markdown("---")
+                st.subheader("Paroles")
+               
+                # Chercher les paroles dans MORCEAUX_GENERES (Prompt_Generation_Paroles)
+                lyrics_from_morceau = current_morceau.get('Prompt_Generation_Paroles', '')
+               
+                # Ou chercher dans PAROLES_EXISTANTES si lié par ID_Morceau
+                lyrics_from_existing = paroles_existantes_df[paroles_existantes_df['ID_Morceau'] == current_morceau['ID_Morceau']]['Paroles_Existantes'].iloc[0] if not paroles_existantes_df[paroles_existantes_df['ID_Morceau'] == current_morceau['ID_Morceau']].empty else ''
+
+                displayed_lyrics = lyrics_from_morceau if lyrics_from_morceau else lyrics_from_existing
+
+                if displayed_lyrics:
+                    st.text_area("Paroles du Morceau :", value=displayed_lyrics, height=400, key="player_displayed_lyrics")
+                else:
+                    st.info("Aucune parole disponible pour ce morceau.")
+                    st.markdown("Vous pouvez générer des paroles via la page 'Générateur de Contenu' et les lier à ce morceau.")
+
+                # --- Visualiseur Audio Réactif (Conceptuel) ---
+                st.markdown("---")
+                st.subheader("Visualiseur Audio (Conceptuel)")
+                st.info("Un visualiseur audio réactif pourrait être implémenté ici pour ajouter une dimension visuelle à l'écoute. Pour l'instant, c'est une idée à développer (nécessite des librairies complexes ou intégrations JS).")
+                st.markdown("![Visualiseur conceptuel](https://via.placeholder.com/600x150?text=Visualiseur+Audio+Conceptuel)", unsafe_allow_html=True)
 
 
     else:
-        st.info("Pas de données à afficher pour la veille stratégique. Veuillez alimenter l'onglet 'Tendances_Marche' dans Google Sheets ou utiliser le 'Générateur de Tendances Marché'.")
+        st.info("Votre collection de morceaux est vide. Allez dans 'Mes Morceaux' pour ajouter vos premières créations !") 
 
+# app.py - Suite du code
 
-elif page == "Portfolio & Performance":
-    st.header("📈 Portfolio & Performance : Vos triomphes chiffrés")
-    st.write("Suivez les performances de chaque œuvre et identifiez vos blockbusters, basés sur vos données saisies ou générées.")
+# --- Page : Mes Albums (Gestion du Sanctuaire) ---
+if st.session_state['current_page'] == 'Mes Albums':
+    st.header("💿 Mes Albums")
+    st.write("Gérez vos albums, leurs pochettes, leurs descriptions et leurs dates de sortie.")
 
-    df_performance = sheets_connector.load_data_from_sheet(config.WORKSHEET_NAME_PERFORMANCE)
-    df_oeuvres = sheets_connector.load_data_from_sheet(config.WORKSHEET_NAME_OEUVRES)
+    albums_df = sc.get_all_albums()
 
-    if not df_performance.empty:
-        st.subheader("Performances Mensuelles Détaillées")
+    tab_albums_view, tab_albums_add, tab_albums_edit = st.tabs(["Voir/Rechercher Albums", "Ajouter un Nouvel Album", "Mettre à Jour/Supprimer Album"])
 
-        df_performance_sorted = df_performance.sort_values(by=['Mois_Annee', 'ID_Oeuvre'], ascending=[True, True])
-        st.dataframe(df_performance_sorted)
-
-        if 'Revenus_Nets' in df_performance_sorted.columns:
-            df_performance_sorted['Revenus_Nets'] = pd.to_numeric(df_performance_sorted['Revenus_Nets'], errors='coerce').fillna(0)
-            total_revenus = df_performance_sorted['Revenus_Nets'].sum()
-            st.metric(label="Revenus Nets Totaux Affichés", value=f"{total_revenus:,.2f} €")
-
-            st.subheader("Graphique des Revenus Mensuels")
-            if 'Mois_Annee' in df_performance_sorted.columns:
-                df_performance_sorted['Mois_Annee'] = pd.to_datetime(df_performance_sorted['Mois_Annee'], errors='coerce')
-                df_performance_agg = df_performance_sorted.dropna(subset=['Mois_Annee']).groupby('Mois_Annee')['Revenus_Nets'].sum().reset_index()
-                chart_revenues = alt.Chart(df_performance_agg).mark_line(point=True).encode(
-                    x=alt.X('Mois_Annee', title='Mois et Année', axis=alt.Axis(format="%b %Y")),
-                    y=alt.Y('Revenus_Nets', title='Revenus Nets (€)'),
-                    tooltip=[alt.Tooltip('Mois_Annee', format="%Y-%m"), 'Revenus_Nets']
-                ).properties(
-                    title='Revenus Nets Mensuels'
-                ).interactive()
-                st.altair_chart(chart_revenues, use_container_width=True)
+    with tab_albums_view:
+        st.subheader("Voir et Rechercher des Albums")
+        if not albums_df.empty:
+            search_album_query = st.text_input("Rechercher par nom d'album ou artiste", key="search_albums")
+            if search_album_query:
+                filtered_albums_df = albums_df[albums_df.apply(lambda row: search_album_query.lower() in row.astype(str).str.lower().to_string(), axis=1)]
             else:
-                st.info("Colonne 'Mois_Annee' manquante ou invalide pour le graphique.")
+                filtered_albums_df = albums_df
+            display_dataframe(ut.format_dataframe_for_display(filtered_albums_df), key="albums_display")
         else:
-            st.info("Colonne 'Revenus_Nets' manquante dans 'Performance_Mensuelle'.")
+            st.info("Aucun album enregistré pour le moment.")
 
-        if 'ID_Oeuvre' in df_performance_sorted.columns and 'Revenus_Nets' in df_performance_sorted.columns:
-            st.subheader("Performance Cumulée par Œuvre")
-            revenus_par_oeuvre = df_performance_sorted.groupby('ID_Oeuvre')['Revenus_Nets'].sum().sort_values(ascending=False).reset_index()
+    with tab_albums_add:
+        st.subheader("Ajouter un Nouvel Album")
+        with st.form("add_album_form"):
+            new_album_nom = st.text_input("Nom de l'Album", key="add_album_nom")
+            new_album_date_sortie = st.date_input("Date de Sortie", value=datetime.now(), key="add_album_date_sortie")
+            new_album_artiste_ia = st.selectbox("Artiste IA Principal", [''] + sc.get_all_artistes_ia()['ID_Artiste_IA'].tolist(), key="add_album_artiste_ia")
+            new_album_description = st.text_area("Description Thématique de l'Album", key="add_album_description")
+           
+            # --- Téléchargement de la Pochette ---
+            uploaded_album_cover = st.file_uploader("Uploader Image de Pochette (.jpg, .png)", type=["jpg", "png"], key="upload_album_cover")
 
-            if not df_oeuvres.empty:
-                merged_df = pd.merge(revenus_par_oeuvre, df_oeuvres[['ID_Oeuvre', 'Titre_Original', 'Titre_Optimise']], on='ID_Oeuvre', how='left')
-                merged_df['Titre_Display'] = merged_df['Titre_Optimise'].fillna(merged_df['Titre_Original']).fillna(merged_df['ID_Oeuvre'])
-                st.dataframe(merged_df[['Titre_Display', 'Revenus_Nets']].rename(columns={'Revenus_Nets': 'Revenus Totaux'}).head(10))
+            submit_new_album = st.form_submit_button("Ajouter l'Album")
 
-                chart_top_oeuvres = alt.Chart(merged_df.head(10)).mark_bar().encode(
-                    x=alt.X('Revenus_Nets', title='Revenus Totaux (€)'),
-                    y=alt.Y('Titre_Display', sort='-x', title='Œuvre'),
-                    tooltip=['Titre_Display', 'Revenus_Nets']
-                ).properties(
-                    title='Top 10 des Œuvres par Revenus'
-                ).interactive()
-                st.altair_chart(chart_top_oeuvres, use_container_width=True)
+            if submit_new_album:
+                cover_path_album = ut.save_uploaded_file(uploaded_album_cover, ALBUM_COVERS_DIR)
 
+                new_album_data = {
+                    'Nom_Album': new_album_nom,
+                    'Date_Sortie': new_album_date_sortie.strftime('%Y-%m-%d'),
+                    'ID_Artiste_Principal': new_album_artiste_ia,
+                    'Description_Thematique': new_album_description,
+                    'URL_Cover_Album': cover_path_album if cover_path_album else ''
+                }
+                if sc.add_album(new_album_data):
+                    st.success(f"Album '{new_album_nom}' ajouté avec succès !")
+                    st.experimental_rerun()
+                else:
+                    st.error("Échec de l'ajout de l'album.")
+
+    with tab_albums_edit:
+        st.subheader("Mettre à Jour ou Supprimer un Album")
+        if not albums_df.empty:
+            album_to_select = st.selectbox(
+                "Sélectionnez l'Album à modifier/supprimer",
+                albums_df['ID_Album'].tolist(),
+                format_func=lambda x: f"{x} - {albums_df[albums_df['ID_Album'] == x]['Nom_Album'].iloc[0]}",
+                key="select_album_to_edit"
+            )
+            if album_to_select:
+                selected_album = albums_df[albums_df['ID_Album'] == album_to_select].iloc[0]
+
+                st.markdown("---")
+                st.write(f"**Modification de :** {selected_album['Nom_Album']}")
+
+                with st.form("update_delete_album_form"):
+                    upd_album_nom = st.text_input("Nom de l'Album", value=selected_album['Nom_Album'], key="upd_album_nom")
+                    upd_album_date_sortie = st.date_input("Date de Sortie", value=pd.to_datetime(selected_album['Date_Sortie']), key="upd_album_date_sortie")
+                    upd_album_artiste_ia = st.selectbox("Artiste IA Principal", [''] + sc.get_all_artistes_ia()['ID_Artiste_IA'].tolist(), index=([''] + sc.get_all_artistes_ia()['ID_Artiste_IA'].tolist()).index(selected_album['ID_Artiste_Principal']) if selected_album['ID_Artiste_Principal'] in ([''] + sc.get_all_artistes_ia()['ID_Artiste_IA'].tolist()) else 0, key="upd_album_artiste_ia")
+                    upd_album_description = st.text_area("Description Thématique de l'Album", value=selected_album['Description_Thematique'], key="upd_album_description")
+
+                    # Affichage de la pochette actuelle et upload pour mise à jour
+                    st.markdown("##### Pochette Actuelle")
+                    if selected_album['URL_Cover_Album']:
+                        st.image(os.path.join(ALBUM_COVERS_DIR, selected_album['URL_Cover_Album']), width=150)
+                    else:
+                        st.info("Aucune pochette enregistrée.")
+                    uploaded_album_cover_upd = st.file_uploader("Uploader Nouvelle Image de Pochette (.jpg, .png)", type=["jpg", "png"], key="upload_album_cover_upd")
+
+                    col_album_form_buttons = st.columns(2)
+                    with col_album_form_buttons[0]:
+                        submit_update_album = st.form_submit_button("Mettre à Jour l'Album")
+                    with col_album_form_buttons[1]:
+                        submit_delete_album = st.form_submit_button("Supprimer l'Album")
+
+                    if submit_update_album:
+                        cover_path_album_upd = selected_album['URL_Cover_Album']
+                        if uploaded_album_cover_upd:
+                            new_cover_path_album = ut.save_uploaded_file(uploaded_album_cover_upd, ALBUM_COVERS_DIR)
+                            if new_cover_path_album: cover_path_album_upd = new_cover_path_album
+
+                        album_data_update = {
+                            'Nom_Album': upd_album_nom,
+                            'Date_Sortie': upd_album_date_sortie.strftime('%Y-%m-%d'),
+                            'ID_Artiste_Principal': upd_album_artiste_ia,
+                            'Description_Thematique': upd_album_description,
+                            'URL_Cover_Album': cover_path_album_upd
+                        }
+                        if sc.update_album(album_to_select, album_data_update):
+                            st.success(f"Album '{upd_album_nom}' mis à jour avec succès !")
+                            st.experimental_rerun()
+                        else:
+                            st.error("Échec de la mise à jour de l'album.")
+
+                    if submit_delete_album:
+                        if st.warning(f"Voulez-vous vraiment supprimer l'album '{selected_album['Nom_Album']}' (ID: {album_to_select}) ?"):
+                            if st.button("Confirmer la suppression", key="confirm_delete_album"):
+                                if sc.delete_row_from_sheet(WORKSHEET_NAMES["ALBUMS"], 'ID_Album', album_to_select):
+                                    st.success(f"Album '{album_to_select}' supprimé avec succès !")
+                                    st.experimental_rerun()
+                                else:
+                                    st.error("Échec de la suppression de l'album.")
+        else:
+            st.info("Aucun album à modifier ou supprimer pour le moment.")
+
+# --- Page : Mes Artistes IA (Gestion du Sanctuaire) ---
+if st.session_state['current_page'] == 'Mes Artistes IA':
+    st.header("🤖 Mes Artistes IA")
+    st.write("Gérez les profils de vos artistes IA, leurs styles, leurs apparences et leurs métadonnées.")
+
+    artistes_ia_df = sc.get_all_artistes_ia()
+
+    tab_artistes_view, tab_artistes_add, tab_artistes_edit = st.tabs(["Voir/Rechercher Artistes IA", "Ajouter un Nouvel Artiste IA", "Mettre à Jour/Supprimer Artiste IA"])
+
+    with tab_artistes_view:
+        st.subheader("Voir et Rechercher des Artistes IA")
+        if not artistes_ia_df.empty:
+            search_artiste_query = st.text_input("Rechercher par nom d'artiste ou style", key="search_artistes")
+            if search_artiste_query:
+                filtered_artistes_ia_df = artistes_ia_df[artistes_ia_df.apply(lambda row: search_artiste_query.lower() in row.astype(str).str.lower().to_string(), axis=1)]
             else:
-                st.warning("Impossible de lier les performances aux titres des œuvres (Onglet 'Oeuvres' vide ou introuvable).")
-                st.dataframe(revenus_par_oeuvre)
+                filtered_artistes_ia_df = artistes_ia_df
+            display_dataframe(ut.format_dataframe_for_display(filtered_artistes_ia_df), key="artistes_display")
         else:
-            st.info("Colonnes 'ID_Oeuvre' ou 'Revenus_Nets' manquantes pour l'analyse par œuvre.")
+            st.info("Aucun artiste IA enregistré pour le moment.")
 
-    else:
-        st.info("Pas de données de performance. Veuillez alimenter l'onglet 'Performance_Mensuelle' dans Google Sheets ou utiliser le 'Générateur de Performances'.")
+    with tab_artistes_add:
+        st.subheader("Ajouter un Nouvel Artiste IA")
+        with st.form("add_artiste_ia_form"):
+            new_artiste_nom = st.text_input("Nom de l'Artiste IA", key="add_artiste_nom")
+            new_artiste_style = st.text_area("Description du Style Musical", key="add_artiste_style")
+            new_artiste_apparence = st.text_area("Description de l'Apparence Visuelle (pour les pochettes)", key="add_artiste_apparence")
+            submit_new_artiste = st.form_submit_button("Ajouter l'Artiste IA")
 
+            if submit_new_artiste:
+                new_artiste_data = {
+                    'Nom_Artiste_IA': new_artiste_nom,
+                    'Description_Style': new_artiste_style,
+                    'Description_Apparence': new_artiste_apparence
+                }
+                if sc.add_artiste_ia(new_artiste_data):
+                    st.success(f"Artiste IA '{new_artiste_nom}' ajouté avec succès !")
+                    st.experimental_rerun()
+                else:
+                    st.error("Échec de l'ajout de l'artiste IA.")
 
-elif page == "Finances du Cartel":
-    st.header("💰 Finances du Cartel : Vue d'ensemble de votre empire")
-    st.write("Visualisez vos revenus globaux et la croissance de votre micro-empire, basés sur vos données saisies ou générées.")
+    with tab_artistes_edit:
+        st.subheader("Mettre à Jour ou Supprimer un Artiste IA")
+        if not artistes_ia_df.empty:
+            artiste_to_select = st.selectbox(
+                "Sélectionnez l'Artiste IA à modifier/supprimer",
+                artistes_ia_df['ID_Artiste_IA'].tolist(),
+                format_func=lambda x: f"{x} - {artistes_ia_df[artistes_ia_df['ID_Artiste_IA'] == x]['Nom_Artiste_IA'].iloc[0]}",
+                key="select_artiste_to_edit"
+            )
+            if artiste_to_select:
+                selected_artiste = artistes_ia_df[artistes_ia_df['ID_Artiste_IA'] == artiste_to_select].iloc[0]
 
-    df_performance = sheets_connector.load_data_from_sheet(config.WORKSHEET_NAME_PERFORMANCE)
+                st.markdown("---")
+                st.write(f"**Modification de :** {selected_artiste['Nom_Artiste_IA']}")
 
-    if not df_performance.empty:
-        if 'Revenus_Nets' in df_performance.columns:
-            df_performance['Revenus_Nets'] = pd.to_numeric(df_performance['Revenus_Nets'], errors='coerce').fillna(0)
-            total_revenus_globaux = df_performance['Revenus_Nets'].sum()
-            st.metric(label="Revenus Nets Cumulés de toutes les œuvres", value=f"{total_revenus_globaux:,.2f} €")
+                with st.form("update_delete_artiste_form"):
+                    upd_artiste_nom = st.text_input("Nom de l'Artiste IA", value=selected_artiste['Nom_Artiste_IA'], key="upd_artiste_nom")
+                    upd_artiste_style = st.text_area("Description du Style Musical", value=selected_artiste['Description_Style'], key="upd_artiste_style")
+                    upd_artiste_apparence = st.text_area("Description de l'Apparence Visuelle", value=selected_artiste['Description_Apparence'], key="upd_artiste_apparence")
 
-            st.subheader("Croissance des Revenus Mensuels")
-            if 'Mois_Annee' in df_performance.columns:
-                df_performance['Mois_Annee'] = pd.to_datetime(df_performance['Mois_Annee'], errors='coerce')
-                df_performance_agg = df_performance.dropna(subset=['Mois_Annee']).groupby('Mois_Annee')['Revenus_Nets'].sum().reset_index()
-                chart_global_revenues = alt.Chart(df_performance_agg).mark_line(point=True).encode(
-                    x=alt.X('Mois_Annee', title='Mois et Année', axis=alt.Axis(format="%b %Y")),
-                    y=alt.Y('Revenus_Nets', title='Revenus Nets Mensuels (€)'),
-                    tooltip=[alt.Tooltip('Mois_Annee', format="%Y-%m"), 'Revenus_Nets']
-                ).properties(
-                    title='Croissance des Revenus Nets Mensuels'
-                ).interactive()
-                st.altair_chart(chart_global_revenues, use_container_width=True)
+                    col_artiste_form_buttons = st.columns(2)
+                    with col_artiste_form_buttons[0]:
+                        submit_update_artiste = st.form_submit_button("Mettre à Jour l'Artiste IA")
+                    with col_artiste_form_buttons[1]:
+                        submit_delete_artiste = st.form_submit_button("Supprimer l'Artiste IA")
+
+                    if submit_update_artiste:
+                        artiste_data_update = {
+                            'Nom_Artiste_IA': upd_artiste_nom,
+                            'Description_Style': upd_artiste_style,
+                            'Description_Apparence': upd_artiste_apparence
+                        }
+                        if sc.update_artiste_ia(artiste_to_select, artiste_data_update):
+                            st.success(f"Artiste IA '{upd_artiste_nom}' mis à jour avec succès !")
+                            st.experimental_rerun()
+                        else:
+                            st.error("Échec de la mise à jour de l'artiste IA.")
+
+                    if submit_delete_artiste:
+                        if st.warning(f"Voulez-vous vraiment supprimer l'artiste IA '{selected_artiste['Nom_Artiste_IA']}' (ID: {artiste_to_select}) ?"):
+                            if st.button("Confirmer la suppression", key="confirm_delete_artiste"):
+                                if sc.delete_row_from_sheet(WORKSHEET_NAMES["ARTISTES_IA"], 'ID_Artiste_IA', artiste_to_select):
+                                    st.success(f"Artiste IA '{artiste_to_select}' supprimé avec succès !")
+                                    st.experimental_rerun()
+                                else:
+                                    st.error("Échec de la suppression de l'artiste IA.")
+        else:
+            st.info("Aucun artiste IA à modifier ou supprimer pour le moment.") 
+
+# app.py - Suite du code
+
+# --- Page : Stats & Tendances Sim. (Analyse & Stratégie) ---
+if st.session_state['current_page'] == 'Stats & Tendances Sim.':
+    st.header("📊 Stats & Tendances d'Écoute Simulées")
+    st.write("Visualisez des statistiques d'écoute simulées pour vos morceaux, identifiez les tendances et suivez les performances virtuelles.")
+
+    with st.form("stats_simulation_form"):
+        st.subheader("Paramètres de Simulation")
+        morceaux_pour_stats = st.multiselect(
+            "Sélectionnez les Morceaux à Simuler",
+            sc.get_all_morceaux()['ID_Morceau'].tolist(),
+            format_func=lambda x: f"{x} - {sc.get_all_morceaux()[sc.get_all_morceaux()['ID_Morceau'] == x]['Titre_Morceau'].iloc[0]}",
+            key="stats_morceaux_a_simuler"
+        )
+        nombre_mois_simulation = st.number_input("Nombre de Mois à Simuler", min_value=1, max_value=36, value=12, step=1, key="stats_nombre_mois")
+        submit_stats_simulation = st.form_submit_button("Simuler les Statistiques")
+
+        if submit_stats_simulation:
+            if morceaux_pour_stats:
+                with st.spinner("L'Oracle simule les tendances d'écoute..."):
+                    stats_df = go.generate_simulated_streaming_stats(morceaux_pour_stats, nombre_mois_simulation)
+                    st.session_state['simulated_stats_df'] = stats_df
+                    st.success("Statistiques simulées avec succès !")
             else:
-                st.info("Colonne 'Mois_Annee' manquante ou invalide pour les tendances mensuelles.")
+                st.warning("Veuillez sélectionner au moins un morceau.")
 
-        else:
-            st.info("Colonne 'Revenus_Nets' manquante dans 'Performance_Mensuelle'.")
-    else:
-        st.info("Pas de données financières à afficher. Veuillez alimenter l'onglet 'Performance_Mensuelle' dans Google Sheets ou utiliser le 'Générateur de Performances'.")
+    if 'simulated_stats_df' in st.session_state and not st.session_state.simulated_stats_df.empty:
+        st.markdown("---")
+        st.subheader("Statistiques d'Écoute Simulées")
+        display_dataframe(ut.format_dataframe_for_display(st.session_state.simulated_stats_df), key="simulated_stats_display")
 
-elif page == "Directive Stratégique de l'Oracle":
-    st.header("🔮 Directive Stratégique de l'Oracle : Votre Plan d'Action")
-    st.write("Demandez à l'Oracle de synthétiser les données du marché et de performance pour vous fournir une stratégie d'action.")
-    st.info("💡 **Performance :** La génération de la directive peut prendre quelques secondes. Streamlit affichera un indicateur de chargement.")
+        # --- Visualisations (Exemple : Graphique des écoutes par mois) ---
+        st.markdown("---")
+        st.subheader("Visualisations (Exemple)")
+        st.info("Des graphiques interactifs peuvent être ajoutés ici pour visualiser les tendances d'écoute.")
+        # Exemple conceptuel :
+        # st.line_chart(st.session_state.simulated_stats_df.pivot(index='Mois_Annee', columns='ID_Morceau', values='Ecoutes_Totales'))
 
-
-    df_tendances = sheets_connector.load_data_from_sheet(config.WORKSHEET_NAME_TENDANCES)
-    df_performance = sheets_connector.load_data_from_sheet(config.WORKSHEET_NAME_PERFORMANCE)
-    df_oeuvres_for_strategy = sheets_connector.load_data_from_sheet(config.WORKSHEET_NAME_OEUVRES)
+# --- Page : Directives Stratégiques (Analyse & Stratégie) ---
+if st.session_state['current_page'] == 'Directives Stratégiques':
+    st.header("🎯 Directives Stratégiques de l'Oracle")
+    st.write("Recevez des conseils stratégiques de l'Oracle pour optimiser vos créations et votre présence musicale.")
 
     with st.form("strategic_directive_form"):
-        st.subheader("Votre Objectif Stratégique :")
-        creative_goal = st.text_area(
-            "Décrivez votre objectif principal pour le Cartel des Plaisirs (ex: 'Maximiser les revenus du prochain trimestre en explorant de nouvelles niches', 'Construire une marque forte autour de la fantasy érotique', 'Tester de nouveaux formats de contenu').",
-            height=100
+        st.subheader("Paramètres de la Directive")
+        objectif_artiste = st.text_area("Quel est votre objectif principal pour cet artiste/morceau/album ? (ex: 'Maximiser les écoutes sur les plateformes', 'Développer une communauté de fans')", key="directive_objectif")
+        morceaux_pour_analyse = st.multiselect(
+            "Sélectionnez les Morceaux à Analyser (optionnel)",
+            sc.get_all_morceaux()['ID_Morceau'].tolist(),
+            format_func=lambda x: f"{x} - {sc.get_all_morceaux()[sc.get_all_morceaux()['ID_Morceau'] == x]['Titre_Morceau'].iloc[0]}",
+            key="directive_morceaux_analyse"
         )
+        submit_directive = st.form_submit_button("Obtenir la Directive Stratégique")
 
-        st.subheader("Données à Considérer :")
-        col_data_options_1, col_data_options_2 = st.columns(2)
-        with col_data_options_1:
-            use_trends = st.checkbox("Inclure les données de Tendances Marché", value=True)
-            if not df_tendances.empty:
-                st.info(f"{len(df_tendances)} entrées de tendances disponibles.")
+        if submit_directive:
+            if objectif_artiste:
+                with st.spinner("L'Oracle élabore une stratégie..."):
+                    directive = go.generate_strategic_music_directive(objectif_artiste, morceaux_pour_analyse)
+                    st.session_state['strategic_directive'] = directive
+                    st.success("Directive stratégique générée !")
             else:
-                st.warning("Aucune donnée de tendances marché disponible. Générez-en via 'Générateur de Tendances Marché'.")
-        with col_data_options_2:
-            use_performance = st.checkbox("Inclure les données de Performance (Revenus)", value=True)
-            if not df_performance.empty:
-                st.info(f"{len(df_performance)} entrées de performance disponibles.")
-            else:
-                st.warning("Aucune donnée de performance disponible. Générez-en via 'Générateur de Performances'.")
+                st.warning("Veuillez définir votre objectif principal.")
 
-        submitted_directive = st.form_submit_button("Générer la Directive Stratégique")
-
-    if submitted_directive:
-        if not creative_goal.strip():
-            st.warning("Veuillez définir votre objectif stratégique avant de générer une directive.")
-        else:
-            trends_data_for_oracle = df_tendances if use_trends else pd.DataFrame()
-
-            performance_data_for_oracle = df_performance.copy() if use_performance else pd.DataFrame()
-            if use_performance and not performance_data_for_oracle.empty and not df_oeuvres_for_strategy.empty:
-                performance_data_for_oracle['Mois_Annee'] = pd.to_datetime(performance_data_for_oracle['Mois_Annee'], format='%m-%Y', errors='coerce')
-
-                performance_data_for_oracle = pd.merge(
-                    performance_data_for_oracle,
-                    df_oeuvres_for_strategy[['ID_Oeuvre', 'Titre_Original', 'Titre_Optimise']],
-                    on='ID_Oeuvre', how='left'
-                )
-                performance_data_for_oracle['Titre_Display'] = performance_data_for_oracle['Titre_Optimise'].fillna(performance_data_for_oracle['Titre_Original']).fillna(performance_data_for_oracle['ID_Oeuvre'])
-                performance_data_for_oracle = performance_data_for_oracle[['ID_Oeuvre', 'Titre_Display', 'Mois_Annee', 'Revenus_Nets', 'Engagement_Score']]
-            elif use_performance and (performance_data_for_oracle.empty or df_oeuvres_for_strategy.empty):
-                st.info("Les données de performance ne pourront pas être liées aux titres des œuvres pour la directive (Données manquantes).")
-            else:
-                performance_data_for_oracle = pd.DataFrame()
-
-
-            with st.spinner("L'Oracle analyse et formule votre directive stratégique..."):
-                directive_generated = gemini_oracle.generate_strategic_directive(
-                    creative_goal,
-                    trends_data_for_oracle,
-                    performance_data_for_oracle
-                )
-            st.session_state.last_directive_text = directive_generated
-
-    if st.session_state.last_directive_text and st.session_state.last_directive_text.strip() != "":
+    if 'strategic_directive' in st.session_state and st.session_state.strategic_directive:
         st.markdown("---")
-        st.subheader("La Directive de l'Oracle :")
-        st.markdown(st.session_state.last_directive_text)
+        st.subheader("Directive Stratégique de l'Oracle")
+        st.text_area("Voici les recommandations de l'Oracle :", value=st.session_state.strategic_directive, height=300, key="directive_output")
 
-        if st.button("Appliquer cette Stratégie à la Génération de Récits"):
-            with st.spinner("L'Oracle extrait les paramètres narratifs de la directive..."):
-                narrative_params = gemini_oracle.parse_strategic_directive_for_narrative_params(st.session_state.last_directive_text)
+# --- Page : Potentiel Viral & Niches (Analyse & Stratégie) ---
+if st.session_state['current_page'] == 'Potentiel Viral & Niches':
+    st.header("📈 Analyse du Potentiel Viral et des Niches")
+    st.write("Identifiez les éléments de vos morceaux qui pourraient attirer un large public et explorez les niches musicales potentielles.")
+    st.info("Cette fonctionnalité est en cours de développement. Elle utilisera l'IA pour analyser les caractéristiques de vos morceaux et suggérer des stratégies de viralité et de ciblage.")
 
-            if narrative_params:
-                st.session_state.generated_narrative_params = narrative_params
-                if narrative_params.get("objective_text_generation_suite", False):
-                    st.session_state.redirect_to_page = "Générateur de Suite"
-                else:
-                    st.session_state.redirect_to_page = "Générateur de Texte (Standalone)"
+    st.warning("Cette section est un placeholder pour une future fonctionnalité. Elle nécessitera une modélisation AI avancée pour analyser les paroles, la musique et les tendances.")
 
-                st.success(f"Paramètres extraits ! Redirection vers le '{st.session_state.redirect_to_page}' pour lancer la création.")
-                st.rerun()
+    # Exemple conceptuel :
+    # analyzed_morceau = st.selectbox("Sélectionnez un Morceau à Analyser", sc.get_all_morceaux()['ID_Morceau'].tolist(), key="viral_morceau_a_analyser")
+    # if analyzed_morceau:
+    #     with st.spinner("L'Oracle analyse le potentiel viral..."):
+    #         viral_analysis = go.analyze_viral_potential(analyzed_morceau)
+    #         st.session_state['viral_analysis'] = viral_analysis
+    #         st.success("Analyse du potentiel viral terminée !")
+
+    # if 'viral_analysis' in st.session_state:
+    #     st.markdown("---")
+    #     st.subheader("Analyse du Potentiel Viral")
+    #     st.text_area("Recommandations de l'Oracle :", value=st.session_state.viral_analysis, height=200) 
+
+# app.py - Suite du code
+
+# --- Pages : Bibliothèques de l'Oracle (Gestion des Données de Référence) ---
+# (Ce bloc de code est un exemple. Il faudra le dupliquer et l'adapter pour chaque bibliothèque : Styles Musicaux, Styles Lyriques, Thèmes, Moods, etc.)
+
+# --- Page : Styles Musicaux (Bibliothèques de l'Oracle) ---
+if st.session_state['current_page'] == 'Styles Musicaux':
+    st.header("🎸 Styles Musicaux")
+    st.write("Gérez les styles musicaux utilisés par l'Oracle pour la génération de contenu.")
+
+    styles_musicaux_df = sc.get_all_styles_musicaux()
+
+    tab_styles_view, tab_styles_add, tab_styles_edit = st.tabs(["Voir/Rechercher Styles", "Ajouter un Nouveau Style", "Mettre à Jour/Supprimer Style"])
+
+    with tab_styles_view:
+        st.subheader("Voir et Rechercher des Styles Musicaux")
+        if not styles_musicaux_df.empty:
+            search_style_query = st.text_input("Rechercher par nom de style ou description", key="search_styles")
+            if search_style_query:
+                filtered_styles_musicaux_df = styles_musicaux_df[styles_musicaux_df.apply(lambda row: search_style_query.lower() in row.astype(str).str.lower().to_string(), axis=1)]
             else:
-                st.warning("L'Oracle n'a pas pu extraire de paramètres narratifs clairs de la directive. Veuillez ajuster la directive ou saisir manuellement les paramètres.")
-
-elif page == "Gestion des Univers & Personnages":
-    st.header("🌌 Gestion des Univers & Personnages : La Mémoire de l'Oracle")
-    st.write("Créez, visualisez et mettez à jour les détails de vos univers et personnages pour une cohérence narrative accrue.")
-
-    df_univers = sheets_connector.load_data_from_sheet(config.WORKSHEET_NAME_UNIVERS)
-
-    st.subheader("Vos Univers Enregistrés")
-    if not df_univers.empty:
-        st.dataframe(df_univers[['ID_Univers', 'Nom_Univers', 'Description_Globale']].head(10))
-
-        selected_universe_to_edit_str = st.selectbox(
-            "Sélectionnez un univers à éditer :",
-            [''] + [f"{row['ID_Univers']} - {row['Nom_Univers']}" for _, row in df_univers.iterrows()],
-            key="edit_universe_select"
-        )
-
-        selected_universe_data_to_edit = {}
-        if selected_universe_to_edit_str:
-            universe_id_to_edit = selected_universe_to_edit_str.split(' - ')[0]
-            if not df_univers.empty and universe_id_to_edit in df_univers['ID_Univers'].tolist():
-                selected_universe_data_to_edit = df_univers[df_univers['ID_Univers'] == universe_id_to_edit].iloc[0].to_dict()
-                st.session_state.current_universe_id_for_edit = universe_id_to_edit
-            else:
-                st.error(f"Erreur: L'univers avec l'ID '{universe_id_to_edit}' n'a pas été trouvé dans les données chargées. Veuillez sélectionner à nouveau ou créer un nouvel univers.")
-                st.session_state.current_universe_id_for_edit = None
+                filtered_styles_musicaux_df = styles_musicaux_df
+            display_dataframe(ut.format_dataframe_for_display(filtered_styles_musicaux_df), key="styles_display")
         else:
-            st.session_state.current_universe_id_for_edit = None
-    else:
-        st.info("Aucun univers enregistré. Créez-en un nouveau ci-dessous.")
-        selected_universe_to_edit_str = ""
+            st.info("Aucun style musical enregistré pour le moment.")
 
+    with tab_styles_add:
+        st.subheader("Ajouter un Nouveau Style Musical")
+        with st.form("add_style_musical_form"):
+            new_style_nom = st.text_input("Nom du Style Musical", key="add_style_nom")
+            new_style_description = st.text_area("Description du Style Musical", key="add_style_description")
+            submit_new_style = st.form_submit_button("Ajouter le Style Musical")
 
-    st.markdown("---")
-
-    current_universe_details = {}
-    if st.session_state.current_universe_id_for_edit:
-        st.subheader(f"Éditer l'Univers : {selected_universe_data_to_edit.get('Nom_Univers', 'N/A')}")
-        current_id_univers = st.session_state.current_universe_id_for_edit
-        current_universe_details = selected_universe_data_to_edit
-    else:
-        st.subheader("Créer un Nouvel Univers")
-        current_id_univers = f"UNI_{datetime.now().strftime('%Y%m%d%H%M%S')}"
-
-    st.subheader("Extraire les détails d'un texte existant (via l'Oracle)")
-    df_oeuvres_for_extraction = sheets_connector.load_data_from_sheet(config.WORKSHEET_NAME_OEUVRES)
-
-    if not df_oeuvres_for_extraction.empty:
-        oeuvre_for_extraction_options = [''] + [f"{row['ID_Oeuvre']} - {row['Titre_Original']}" for _, row in df_oeuvres_for_extraction.iterrows()]
-        selected_oeuvre_for_extract_str = st.selectbox(
-            "Sélectionnez une œuvre pour extraire les détails d'univers/personnages :",
-            oeuvre_for_extraction_options, key="oeuvre_extract_select_outside_form_unique"
-        )
-        if selected_oeuvre_for_extract_str:
-            oeuvre_id_to_extract = selected_oeuvre_for_extract_str.split(' - ')[0]
-            if oeuvre_id_to_extract in df_oeuvres_for_extraction['ID_Oeuvre'].tolist():
-                oeuvre_to_extract_data = df_oeuvres_for_extraction[df_oeuvres_for_extraction['ID_Oeuvre'] == oeuvre_id_to_extract].iloc[0]
-
-                full_text_to_analyze = oeuvre_to_extract_data.get('Texte_Genere', '')
-                if not full_text_to_analyze and oeuvre_to_extract_data.get('URL_Texte_Local'):
-                    local_text_path = os.path.join(os.path.dirname(__file__), oeuvre_to_extract_data['URL_Texte_Local'])
-                    if os.path.exists(local_text_path):
-                        with open(local_text_path, 'r', encoding='utf-8') as f:
-                            full_text_to_analyze = f.read()
-
-                if full_text_to_analyze.strip():
-                    if st.button("Extraire les Détails par l'Oracle (remplira les champs ci-dessous)", key="extract_details_button_outside_form_unique"):
-                        with st.spinner("L'Oracle analyse le texte pour extraire les détails d'univers et de personnages..."):
-                            extracted_plot = gemini_oracle.summarize_plot(full_text_to_analyze)
-                            extracted_characters = gemini_oracle.extract_character_details(full_text_to_analyze)
-                        st.session_state.extracted_plot_for_universe = extracted_plot
-                        st.session_state.extracted_characters_for_universe = extracted_characters
-                        st.info("Détails extraits ! Ils apparaîtront dans les champs ci-dessous. Cliquez sur 'Sauvegarder l'Univers' pour enregistrer.")
-                        st.rerun()
+            if submit_new_style:
+                new_style_data = {
+                    'Nom_Style_Musical': new_style_nom,
+                    'Description_Style': new_style_description
+                }
+                if sc.add_style_musical(new_style_data):
+                    st.success(f"Style musical '{new_style_nom}' ajouté avec succès !")
+                    st.experimental_rerun()
                 else:
-                    st.warning("Texte de l'œuvre sélectionnée vide. Impossible d'extraire des détails.")
-            else:
-                st.warning(f"L'ID d'œuvre '{oeuvre_id_to_extract}' n'a pas été trouvé. Veuillez sélectionner une œuvre valide.")
+                    st.error("Échec de l'ajout du style musical.")
+
+    with tab_styles_edit:
+        st.subheader("Mettre à Jour ou Supprimer un Style Musical")
+        if not styles_musicaux_df.empty:
+            style_to_select = st.selectbox(
+                "Sélectionnez le Style Musical à modifier/supprimer",
+                styles_musicaux_df['ID_Style_Musical'].tolist(),
+                format_func=lambda x: f"{x} - {styles_musicaux_df[styles_musicaux_df['ID_Style_Musical'] == x]['Nom_Style_Musical'].iloc[0]}",
+                key="select_style_to_edit"
+            )
+            if style_to_select:
+                selected_style = styles_musicaux_df[styles_musicaux_df['ID_Style_Musical'] == style_to_select].iloc[0]
+
+                st.markdown("---")
+                st.write(f"**Modification de :** {selected_style['Nom_Style_Musical']}")
+
+                with st.form("update_delete_style_form"):
+                    upd_style_nom = st.text_input("Nom du Style Musical", value=selected_style['Nom_Style_Musical'], key="upd_style_nom")
+                    upd_style_description = st.text_area("Description du Style Musical", value=selected_style['Description_Style'], key="upd_style_description")
+
+                    col_style_form_buttons = st.columns(2)
+                    with col_style_form_buttons[0]:
+                        submit_update_style = st.form_submit_button("Mettre à Jour le Style Musical")
+                    with col_style_form_buttons[1]:
+                        submit_delete_style = st.form_submit_button("Supprimer le Style Musical")
+
+                    if submit_update_style:
+                        style_data_update = {
+                            'Nom_Style_Musical': upd_style_nom,
+                            'Description_Style': upd_style_description
+                        }
+                        if sc.update_style_musical(style_to_select, style_data_update):
+                            st.success(f"Style musical '{upd_style_nom}' mis à jour avec succès !")
+                            st.experimental_rerun()
+                        else:
+                            st.error("Échec de la mise à jour du style musical.")
+
+                    if submit_delete_style:
+                        if st.warning(f"Voulez-vous vraiment supprimer le style musical '{selected_style['Nom_Style_Musical']}' (ID: {style_to_select}) ?"):
+                            if st.button("Confirmer la suppression", key="confirm_delete_style"):
+                                if sc.delete_row_from_sheet(WORKSHEET_NAMES["STYLES_MUSICAUX"], 'ID_Style_Musical', style_to_select):
+                                    st.success(f"Style musical '{style_to_select}' supprimé avec succès !")
+                                    st.experimental_rerun()
+                                else:
+                                    st.error("Échec de la suppression du style musical.")
         else:
-            st.info("Sélectionnez une œuvre avec du texte pour extraire des détails.")
-    else:
-        st.info("Aucune œuvre disponible pour l'extraction de détails. Générez-en via le 'Générateur de Texte'.")
+            st.info("Aucun style musical à modifier ou supprimer pour le moment.")
 
-    st.markdown("---")
+# --- Dupliquer et adapter ce bloc pour chaque bibliothèque : Styles Lyriques, Thèmes, Moods, Instruments, etc. ---
+# --- Page : Styles Lyriques (Bibliothèques de l'Oracle) ---
+if st.session_state['current_page'] == 'Styles Lyriques':
+    st.header("📝 Styles Lyriques")
+    st.write("Gérez les styles d'écriture lyrique utilisés par l'Oracle pour la génération de paroles.")
 
-    with st.form("universe_edit_form", clear_on_submit=False):
-        st.write(f"ID Univers : `{current_id_univers}`")
+    styles_lyriques_df = sc.get_all_styles_lyriques()
 
-        default_plot_value = st.session_state.extracted_plot_for_universe if st.session_state.extracted_plot_for_universe else current_universe_details.get('Elements_Cles_Intrigue', '')
-        default_chars_value = st.session_state.extracted_characters_for_universe if st.session_state.extracted_characters_for_universe else current_universe_details.get('Personnages_Cles', '')
+    tab_styles_lyriques_view, tab_styles_lyriques_add, tab_styles_lyriques_edit = st.tabs(["Voir/Rechercher Styles", "Ajouter un Nouveau Style", "Mettre à Jour/Supprimer Style"])
 
-        new_nom_univers = st.text_input("Nom de l'Univers :", value=current_universe_details.get('Nom_Univers', ''), key="uni_name")
-        new_description_globale = st.text_area("Description Globale de l'Univers :", value=current_universe_details.get('Description_Globale', ''), height=150, key="uni_desc")
-        new_elements_cles_intrigue = st.text_area("Éléments Clés de l'Intrigue/Historique de l'Univers :", value=default_plot_value, height=150, key="uni_plot")
-        new_personnages_cles = st.text_area("Détails sur les Personnages Clés (Noms, Traits, Relations) :", value=default_chars_value, height=150, key="uni_chars")
-        new_notes_internes = st.text_area("Notes Internes :", value=current_universe_details.get('Notes_Internes', ''), height=100, key="uni_notes")
-
-        submitted_universe = st.form_submit_button("Sauvegarder l'Univers")
-
-        if submitted_universe:
-            st.session_state.extracted_plot_for_universe = ""
-            st.session_state.extracted_characters_for_universe = ""
-
-            updates = {
-                'ID_Univers': current_id_univers,
-                'Nom_Univers': st.session_state.uni_name,
-                'Description_Globale': st.session_state.uni_desc,
-                'Elements_Cles_Intrigue': st.session_state.uni_plot,
-                'Personnages_Cles': st.session_state.uni_chars,
-                'Notes_Internes': st.session_state.uni_notes
-            }
-
-            if st.session_state.current_universe_id_for_edit:
-                if sheets_connector.update_row_by_id(config.WORKSHEET_NAME_UNIVERS, 'ID_Univers', current_id_univers, updates):
-                    st.success(f"Univers '{st.session_state.uni_name}' mis à jour avec succès !")
-                else:
-                    st.error(f"Échec de la mise à jour de l'univers '{st.session_state.uni_name}'.")
+    with tab_styles_lyriques_view:
+        st.subheader("Voir et Rechercher des Styles Lyriques")
+        if not styles_lyriques_df.empty:
+            search_style_lyrique_query = st.text_input("Rechercher par nom de style ou description", key="search_styles_lyriques")
+            if search_style_lyrique_query:
+                filtered_styles_lyriques_df = styles_lyriques_df[styles_lyriques_df.apply(lambda row: search_style_lyrique_query.lower() in row.astype(str).str.lower().to_string(), axis=1)]
             else:
-                if sheets_connector.append_rows_to_sheet(config.WORKSHEET_NAME_UNIVERS, [updates]):
-                    st.success(f"Nouvel univers '{st.session_state.uni_name}' créé avec succès !")
-
-            st.session_state.current_universe_id_for_edit = None
-            sheets_connector.load_data_from_sheet.clear()
-            st.rerun()
-
-    st.markdown("---")
-    st.subheader("Supprimer un Univers Existant")
-    if not df_univers.empty:
-        delete_universe_options = [''] + [f"{row['ID_Univers']} - {row['Nom_Univers']}" for _, row in df_univers.iterrows()]
-        selected_universe_to_delete_str = st.selectbox(
-            "Sélectionnez un univers à supprimer :",
-            delete_universe_options, key="delete_universe_select"
-        )
-        if selected_universe_to_delete_str:
-            universe_id_to_delete = selected_universe_to_delete_str.split(' - ')[0]
-            if st.button(f"Supprimer l'Univers '{universe_id_to_delete}'", key="delete_universe_btn"):
-                show_confirm_modal(universe_id_to_delete, "universe")
-    else:
-        st.info("Aucun univers à supprimer.")
-
-elif page == "Gestion des Styles d'Écriture":
-    st.header("🎨 Gestion des Styles d'Écriture : La Voix de l'Oracle")
-    st.write("Créez, visualisez et éditez les styles narratifs que l'Oracle pourra émuler dans vos récits.")
-
-    df_styles = sheets_connector.load_data_from_sheet(config.WORKSHEET_NAME_STYLES)
-
-    st.subheader("Vos Styles Enregistrés")
-    if not df_styles.empty:
-        st.dataframe(df_styles[['ID_Style', 'Nom_Style', 'Niveau_Explicite_Defaut', 'Description_Style']].head(10))
-
-        selected_style_to_edit_str = st.selectbox(
-            "Sélectionnez un style à éditer :",
-            [''] + [f"{row['ID_Style']} - {row['Nom_Style']}" for _, row in df_styles.iterrows()],
-            key="edit_style_select"
-        )
-
-        selected_style_data_to_edit = {}
-        if selected_style_to_edit_str:
-            style_id_to_edit = selected_style_to_edit_str.split(' - ')[0]
-            if not df_styles.empty and style_id_to_edit in df_styles['ID_Style'].tolist():
-                selected_style_data_to_edit = df_styles[df_styles['ID_Style'] == style_id_to_edit].iloc[0].to_dict()
-                st.session_state.current_style_id_for_edit = style_id_to_edit
-            else:
-                st.error(f"Erreur: Le style avec l'ID '{style_id_to_edit}' n'a pas été trouvé dans les données chargées. Veuillez sélectionner à nouveau ou créer un nouveau style.")
-                st.session_state.current_style_id_for_edit = None
+                filtered_styles_lyriques_df = styles_lyriques_df
+            display_dataframe(ut.format_dataframe_for_display(filtered_styles_lyriques_df), key="styles_lyriques_display")
         else:
-            st.session_state.current_style_id_for_edit = None
-    else:
-        st.info("Aucun style enregistré. Créez-en un nouveau ci-dessous.")
-        selected_style_to_edit_str = ""
+            st.info("Aucun style lyrique enregistré pour le moment.")
 
+    with tab_styles_lyriques_add:
+        st.subheader("Ajouter un Nouveau Style Lyrique")
+        with st.form("add_style_lyrique_form"):
+            new_style_lyrique_nom = st.text_input("Nom du Style Lyrique", key="add_style_lyrique_nom")
+            new_style_lyrique_description = st.text_area("Description du Style Lyrique", key="add_style_lyrique_description")
+            new_style_lyrique_exemples = st.text_area("Exemples Textuels (séparés par des sauts de ligne)", key="add_style_lyrique_exemples")
+            submit_new_style_lyrique = st.form_submit_button("Ajouter le Style Lyrique")
 
-    st.markdown("---")
-
-    current_style_details = {}
-    if st.session_state.current_style_id_for_edit:
-        st.subheader(f"Éditer le Style : {selected_style_data_to_edit.get('Nom_Style', 'N/A')}")
-        current_id_style = st.session_state.current_style_id_for_edit
-        current_style_details = selected_style_data_to_edit
-    else:
-        st.subheader("Créer un Nouveau Style")
-        current_id_style = f"STYLE_{datetime.now().strftime('%Y%m%d%H%M%S')}"
-
-    with st.form("style_edit_form", clear_on_submit=False):
-        st.write(f"ID Style : `{current_id_style}`")
-
-        new_nom_style = st.text_input("Nom du Style :", value=current_style_details.get('Nom_Style', ''), key="style_name")
-        new_description_style = st.text_area("Description Détaillée du Style (pour l'IA) :", value=current_style_details.get('Description_Style', ''), height=200, key="style_desc")
-        new_exemples_textuels = st.text_area("Exemples Textuels (facultatif) :", value=current_style_details.get('Exemples_Textuels', ''), height=100, key="style_examples")
-
-        spiciness_options_for_style = ["", "doux", "modéré", "explicite"]
-        default_spiciness_style = current_style_details.get('Niveau_Explicite_Defaut', '')
-        try:
-            spiciness_index_for_style = spiciness_options_for_style.index(default_spiciness_style)
-        except ValueError:
-            spiciness_index_for_style = 0
-        new_niveau_explicite_defaut = st.selectbox("Niveau de Sensualité par Défaut :", spiciness_options_for_style, index=spiciness_index_for_style, key="style_spiciness_default")
-
-        new_notes_internes = st.text_area("Notes Internes :", value=current_style_details.get('Notes_Internes', ''), height=100, key="style_notes")
-
-        submitted_style = st.form_submit_button("Sauvegarder le Style")
-
-        if submitted_style:
-            updates = {
-                'ID_Style': current_id_style,
-                'Nom_Style': st.session_state.style_name,
-                'Description_Style': st.session_state.style_desc,
-                'Exemples_Textuels': st.session_state.style_examples,
-                'Niveau_Explicite_Defaut': st.session_state.style_spiciness_default,
-                'Notes_Internes': st.session_state.style_notes
-            }
-
-            if st.session_state.current_style_id_for_edit:
-                if sheets_connector.update_row_by_id(config.WORKSHEET_NAME_STYLES, 'ID_Style', current_id_style, updates):
-                    st.success(f"Style '{st.session_state.style_name}' mis à jour avec succès !")
+            if submit_new_style_lyrique:
+                new_style_lyrique_data = {
+                    'Nom_Style_Lyrique': new_style_lyrique_nom,
+                    'Description_Style': new_style_lyrique_description,
+                    'Exemples_Textuels': new_style_lyrique_exemples
+                }
+                if sc.add_style_lyrique(new_style_lyrique_data):
+                    st.success(f"Style lyrique '{new_style_lyrique_nom}' ajouté avec succès !")
+                    st.experimental_rerun()
                 else:
-                    st.error(f"Échec de la mise à jour du style '{st.session_state.style_name}'.")
+                    st.error("Échec de l'ajout du style lyrique.")
+
+    with tab_styles_lyriques_edit:
+        st.subheader("Mettre à Jour ou Supprimer un Style Lyrique")
+        if not styles_lyriques_df.empty:
+            style_lyrique_to_select = st.selectbox(
+                "Sélectionnez le Style Lyrique à modifier/supprimer",
+                styles_lyriques_df['ID_Style_Lyrique'].tolist(),
+                format_func=lambda x: f"{x} - {styles_lyriques_df[styles_lyriques_df['ID_Style_Lyrique'] == x]['Nom_Style_Lyrique'].iloc[0]}",
+                key="select_style_lyrique_to_edit"
+            )
+            if style_lyrique_to_select:
+                selected_style_lyrique = styles_lyriques_df[styles_lyriques_df['ID_Style_Lyrique'] == style_lyrique_to_select].iloc[0]
+
+                st.markdown("---")
+                st.write(f"**Modification de :** {selected_style_lyrique['Nom_Style_ 
+
+# app.py - Suite du code de la Section 9
+
+# --- Page : Styles Lyriques (Bibliothèques de l'Oracle) ---
+if st.session_state['current_page'] == 'Styles Lyriques':
+    st.header("📝 Styles Lyriques")
+    st.write("Gérez les styles d'écriture lyrique utilisés par l'Oracle pour la génération de paroles.")
+
+    styles_lyriques_df = sc.get_all_styles_lyriques()
+
+    tab_styles_lyriques_view, tab_styles_lyriques_add, tab_styles_lyriques_edit = st.tabs(["Voir/Rechercher Styles", "Ajouter un Nouveau Style", "Mettre à Jour/Supprimer Style"])
+
+    with tab_styles_lyriques_view:
+        st.subheader("Voir et Rechercher des Styles Lyriques")
+        if not styles_lyriques_df.empty:
+            search_style_lyrique_query = st.text_input("Rechercher par nom de style ou description", key="search_styles_lyriques")
+            if search_style_lyrique_query:
+                filtered_styles_lyriques_df = styles_lyriques_df[styles_lyriques_df.apply(lambda row: search_style_lyrique_query.lower() in row.astype(str).str.lower().to_string(), axis=1)]
             else:
-                if sheets_connector.append_rows_to_sheet(config.WORKSHEET_NAME_STYLES, [updates]):
-                    st.success(f"Nouveau style '{st.session_state.style_name}' créé avec succès !")
+                filtered_styles_lyriques_df = styles_lyriques_df
+            display_dataframe(ut.format_dataframe_for_display(filtered_styles_lyriques_df), key="styles_lyriques_display")
+        else:
+            st.info("Aucun style lyrique enregistré pour le moment.")
 
-            st.session_state.current_style_id_for_edit = None
-            sheets_connector.load_data_from_sheet.clear()
-            st.rerun()
+    with tab_styles_lyriques_add:
+        st.subheader("Ajouter un Nouveau Style Lyrique")
+        with st.form("add_style_lyrique_form"):
+            new_style_lyrique_nom = st.text_input("Nom du Style Lyrique", key="add_style_lyrique_nom")
+            new_style_lyrique_description = st.text_area("Description du Style Lyrique", key="add_style_lyrique_description")
+            new_style_lyrique_auteurs = st.text_input("Auteurs Références (séparés par des virgules)", key="add_style_lyrique_auteurs")
+            new_style_lyrique_exemples = st.text_area("Exemples Textuels Courts", key="add_style_lyrique_exemples")
+            submit_new_style_lyrique = st.form_submit_button("Ajouter le Style Lyrique")
 
-    st.markdown("---")
-    st.subheader("Supprimer un Style Existant")
-    if not df_styles.empty:
-        delete_style_options = [''] + [f"{row['ID_Style']} - {row['Nom_Style']}" for _, row in df_styles.iterrows()]
-        selected_style_to_delete_str = st.selectbox(
-            "Sélectionnez un style à supprimer :",
-            delete_style_options, key="delete_style_select"
-        )
-        if selected_style_to_delete_str:
-            style_id_to_delete = selected_style_to_delete_str.split(' - ')[0]
-            if st.button(f"Supprimer le Style '{style_id_to_delete}'", key="delete_style_btn"):
-                show_confirm_modal(style_id_to_delete, "style")
-    else:
-        st.info("Aucun style à supprimer.")
+            if submit_new_style_lyrique:
+                new_style_lyrique_data = {
+                    'Nom_Style_Lyrique': new_style_lyrique_nom,
+                    'Description_Detaillee': new_style_lyrique_description,
+                    'Auteurs_References': new_style_lyrique_auteurs,
+                    'Exemples_Textuels_Courts': new_style_lyrique_exemples
+                }
+                # Assuming sc.add_style_lyrique is defined in sheets_connector.py
+                # This function needs to be created or adapted in sheets_connector.py if not already.
+                # Example: sc.add_style_lyrique will call sc.append_row_to_sheet("STYLES_LYRIQUES_UNIVERS", data)
+                if sc.append_row_to_sheet(WORKSHEET_NAMES["STYLES_LYRIQUES_UNIVERS"], new_style_lyrique_data):
+                    st.success(f"Style lyrique '{new_style_lyrique_nom}' ajouté avec succès !")
+                    st.experimental_rerun()
+                else:
+                    st.error("Échec de l'ajout du style lyrique.")
+
+    with tab_styles_lyriques_edit:
+        st.subheader("Mettre à Jour ou Supprimer un Style Lyrique")
+        if not styles_lyriques_df.empty:
+            style_lyrique_to_select = st.selectbox(
+                "Sélectionnez le Style Lyrique à modifier/supprimer",
+                styles_lyriques_df['ID_Style_Lyrique'].tolist(),
+                format_func=lambda x: f"{x} - {styles_lyriques_df[styles_lyriques_df['ID_Style_Lyrique'] == x]['Nom_Style_Lyrique'].iloc[0]}",
+                key="select_style_lyrique_to_edit"
+            )
+            if style_lyrique_to_select:
+                selected_style_lyrique = styles_lyriques_df[styles_lyriques_df['ID_Style_Lyrique'] == style_lyrique_to_select].iloc[0]
+
+                st.markdown("---")
+                st.write(f"**Modification de :** {selected_style_lyrique['Nom_Style_Lyrique']}")
+
+                with st.form("update_delete_style_lyrique_form"):
+                    upd_style_lyrique_nom = st.text_input("Nom du Style Lyrique", value=selected_style_lyrique['Nom_Style_Lyrique'], key="upd_style_lyrique_nom")
+                    upd_style_lyrique_description = st.text_area("Description du Style Lyrique", value=selected_style_lyrique['Description_Detaillee'], key="upd_style_lyrique_description")
+                    upd_style_lyrique_auteurs = st.text_input("Auteurs Références (séparés par des virgules)", value=selected_style_lyrique['Auteurs_References'], key="upd_style_lyrique_auteurs")
+                    upd_style_lyrique_exemples = st.text_area("Exemples Textuels Courts", value=selected_style_lyrique['Exemples_Textuels_Courts'], key="upd_style_lyrique_exemples")
+
+                    col_style_lyrique_form_buttons = st.columns(2)
+                    with col_style_lyrique_form_buttons[0]:
+                        submit_update_style_lyrique = st.form_submit_button("Mettre à Jour le Style Lyrique")
+                    with col_style_lyrique_form_buttons[1]:
+                        submit_delete_style_lyrique = st.form_submit_button("Supprimer le Style Lyrique")
+
+                    if submit_update_style_lyrique:
+                        style_lyrique_data_update = {
+                            'Nom_Style_Lyrique': upd_style_lyrique_nom,
+                            'Description_Detaillee': upd_style_lyrique_description,
+                            'Auteurs_References': upd_style_lyrique_auteurs,
+                            'Exemples_Textuels_Courts': upd_style_lyrique_exemples
+                        }
+                        # Assuming sc.update_style_lyrique is defined in sheets_connector.py
+                        # Example: sc.update_style_lyrique calls sc.update_row_in_sheet(WORKSHEET_NAMES["STYLES_LYRIQUES_UNIVERS"], 'ID_Style_Lyrique', style_lyrique_to_select, data)
+                        if sc.update_row_in_sheet(WORKSHEET_NAMES["STYLES_LYRIQUES_UNIVERS"], 'ID_Style_Lyrique', style_lyrique_to_select, style_lyrique_data_update):
+                            st.success(f"Style lyrique '{upd_style_lyrique_nom}' mis à jour avec succès !")
+                            st.experimental_rerun()
+                        else:
+                            st.error("Échec de la mise à jour du style lyrique.")
+
+                    if submit_delete_style_lyrique:
+                        if st.warning(f"Voulez-vous vraiment supprimer le style lyrique '{selected_style_lyrique['Nom_Style_Lyrique']}' (ID: {style_lyrique_to_select}) ?"):
+                            if st.button("Confirmer la suppression", key="confirm_delete_style_lyrique"):
+                                if sc.delete_row_from_sheet(WORKSHEET_NAMES["STYLES_LYRIQUES_UNIVERS"], 'ID_Style_Lyrique', style_lyrique_to_select):
+                                    st.success(f"Style lyrique '{style_lyrique_to_select}' supprimé avec succès !")
+                                    st.experimental_rerun()
+                                else:
+                                    st.error("Échec de la suppression du style lyrique.")
+        else:
+            st.info("Aucun style lyrique à modifier ou supprimer pour le moment.")
+
+# --- Page : Thèmes & Concepts (Bibliothèques de l'Oracle) ---
+if st.session_state['current_page'] == 'Thèmes & Concepts':
+    st.header("🌌 Thèmes & Concepts")
+    st.write("Gérez les thèmes et concepts que l'Oracle peut explorer dans vos créations.")
+
+    themes_df = sc.get_all_themes()
+
+    tab_themes_view, tab_themes_add, tab_themes_edit = st.tabs(["Voir/Rechercher Thèmes", "Ajouter un Nouveau Thème", "Mettre à Jour/Supprimer Thème"])
+
+    with tab_themes_view:
+        st.subheader("Voir et Rechercher des Thèmes")
+        if not themes_df.empty:
+            search_theme_query = st.text_input("Rechercher par nom de thème ou description", key="search_themes")
+            if search_theme_query:
+                filtered_themes_df = themes_df[themes_df.apply(lambda row: search_theme_query.lower() in row.astype(str).str.lower().to_string(), axis=1)]
+            else:
+                filtered_themes_df = themes_df
+            display_dataframe(ut.format_dataframe_for_display(filtered_themes_df), key="themes_display")
+        else:
+            st.info("Aucun thème enregistré pour le moment.")
+
+    with tab_themes_add:
+        st.subheader("Ajouter un Nouveau Thème")
+        with st.form("add_theme_form"):
+            new_theme_nom = st.text_input("Nom du Thème", key="add_theme_nom")
+            new_theme_description = st.text_area("Description Conceptuelle", key="add_theme_description")
+            new_theme_mots_cles = st.text_input("Mots-clés Associés (séparés par des virgules)", key="add_theme_mots_cles")
+            submit_new_theme = st.form_submit_button("Ajouter le Thème")
+
+            if submit_new_theme:
+                new_theme_data = {
+                    'Nom_Theme': new_theme_nom,
+                    'Description_Conceptuelle': new_theme_description,
+                    'Mots_Cles_Associes': new_theme_mots_cles
+                }
+                # Assuming sc.add_theme is defined in sheets_connector.py
+                if sc.append_row_to_sheet(WORKSHEET_NAMES["THEMES_CONSTELLES"], new_theme_data):
+                    st.success(f"Thème '{new_theme_nom}' ajouté avec succès !")
+                    st.experimental_rerun()
+                else:
+                    st.error("Échec de l'ajout du thème.")
+
+    with tab_themes_edit:
+        st.subheader("Mettre à Jour ou Supprimer un Thème")
+        if not themes_df.empty:
+            theme_to_select = st.selectbox(
+                "Sélectionnez le Thème à modifier/supprimer",
+                themes_df['ID_Theme'].tolist(),
+                format_func=lambda x: f"{x} - {themes_df[themes_df['ID_Theme'] == x]['Nom_Theme'].iloc[0]}",
+                key="select_theme_to_edit"
+            )
+            if theme_to_select:
+                selected_theme = themes_df[themes_df['ID_Theme'] == theme_to_select].iloc[0]
+
+                st.markdown("---")
+                st.write(f"**Modification de :** {selected_theme['Nom_Theme']}")
+
+                with st.form("update_delete_theme_form"):
+                    upd_theme_nom = st.text_input("Nom du Thème", value=selected_theme['Nom_Theme'], key="upd_theme_nom")
+                    upd_theme_description = st.text_area("Description Conceptuelle", value=selected_theme['Description_Conceptuelle'], key="upd_theme_description")
+                    upd_theme_mots_cles = st.text_input("Mots-clés Associés (séparés par des virgules)", value=selected_theme['Mots_Cles_Associes'], key="upd_theme_mots_cles")
+
+                    col_theme_form_buttons = st.columns(2)
+                    with col_theme_form_buttons[0]:
+                        submit_update_theme = st.form_submit_button("Mettre à Jour le Thème")
+                    with col_theme_form_buttons[1]:
+                        submit_delete_theme = st.form_submit_button("Supprimer le Thème")
+
+                    if submit_update_theme:
+                        theme_data_update = {
+                            'Nom_Theme': upd_theme_nom,
+                            'Description_Conceptuelle': upd_theme_description,
+                            'Mots_Cles_Associes': upd_theme_mots_cles
+                        }
+                        if sc.update_row_in_sheet(WORKSHEET_NAMES["THEMES_CONSTELLES"], 'ID_Theme', theme_to_select, theme_data_update):
+                            st.success(f"Thème '{upd_theme_nom}' mis à jour avec succès !")
+                            st.experimental_rerun()
+                        else:
+                            st.error("Échec de la mise à jour du thème.")
+
+                    if submit_delete_theme:
+                        if st.warning(f"Voulez-vous vraiment supprimer le thème '{selected_theme['Nom_Theme']}' (ID: {theme_to_select}) ?"):
+                            if st.button("Confirmer la suppression", key="confirm_delete_theme"):
+                                if sc.delete_row_from_sheet(WORKSHEET_NAMES["THEMES_CONSTELLES"], 'ID_Theme', theme_to_select):
+                                    st.success(f"Thème '{theme_to_select}' supprimé avec succès !")
+                                    st.experimental_rerun()
+                                else:
+                                    st.error("Échec de la suppression du thème.")
+        else:
+            st.info("Aucun thème à modifier ou supprimer pour le moment.")
+
+# --- Page : Moods & Émotions (Bibliothèques de l'Oracle) ---
+if st.session_state['current_page'] == 'Moods & Émotions':
+    st.header("❤️ Moods & Émotions")
+    st.write("Gérez les moods et émotions que l'Oracle peut utiliser pour colorer vos créations.")
+
+    moods_df = sc.get_all_moods()
+
+    tab_moods_view, tab_moods_add, tab_moods_edit = st.tabs(["Voir/Rechercher Moods", "Ajouter un Nouveau Mood", "Mettre à Jour/Supprimer Mood"])
+
+    with tab_moods_view:
+        st.subheader("Voir et Rechercher des Moods")
+        if not moods_df.empty:
+            search_mood_query = st.text_input("Rechercher par nom de mood ou description", key="search_moods")
+            if search_mood_query:
+                filtered_moods_df = moods_df[moods_df.apply(lambda row: search_mood_query.lower() in row.astype(str).str.lower().to_string(), axis=1)]
+            else:
+                filtered_moods_df = moods_df
+            display_dataframe(ut.format_dataframe_for_display(filtered_moods_df), key="moods_display")
+        else:
+            st.info("Aucun mood enregistré pour le moment.")
+
+    with tab_moods_add:
+        st.subheader("Ajouter un Nouveau Mood")
+        with st.form("add_mood_form"):
+            new_mood_nom = st.text_input("Nom du Mood", key="add_mood_nom")
+            new_mood_description = st.text_area("Description Nuancée", key="add_mood_description")
+            new_mood_intensite = st.number_input("Niveau d'Intensité (1-5)", min_value=1, max_value=5, value=3, step=1, key="add_mood_intensite")
+            new_mood_mots_cles = st.text_input("Mots-clés Associés (séparés par des virgules)", key="add_mood_mots_cles")
+            new_mood_couleur = st.color_picker("Couleur Associée", key="add_mood_couleur")
+            new_mood_tempo_range = st.text_input("Plage de Tempo Suggérée (ex: 80-120)", key="add_mood_tempo_range")
+            submit_new_mood = st.form_submit_button("Ajouter le Mood")
+
+            if submit_new_mood:
+                new_mood_data = {
+                    'Nom_Mood': new_mood_nom,
+                    'Description_Nuance': new_mood_description,
+                    'Niveau_Intensite': new_mood_intensite,
+                    'Mots_Cles_Associes': new_mood_mots_cles,
+                    'Couleur_Associee': new_mood_couleur,
+                    'Tempo_Range_Suggerer': new_mood_tempo_range
+                }
+                if sc.append_row_to_sheet(WORKSHEET_NAMES["MOODS_ET_EMOTIONS"], new_mood_data):
+                    st.success(f"Mood '{new_mood_nom}' ajouté avec succès !")
+                    st.experimental_rerun()
+                else:
+                    st.error("Échec de l'ajout du mood.")
+
+    with tab_moods_edit:
+        st.subheader("Mettre à Jour ou Supprimer un Mood")
+        if not moods_df.empty:
+            mood_to_select = st.selectbox(
+                "Sélectionnez le Mood à modifier/supprimer",
+                moods_df['ID_Mood'].tolist(),
+                format_func=lambda x: f"{x} - {moods_df[moods_df['ID_Mood'] == x]['Nom_Mood'].iloc[0]}",
+                key="select_mood_to_edit"
+            )
+            if mood_to_select:
+                selected_mood = moods_df[moods_df['ID_Mood'] == mood_to_select].iloc[0]
+
+                st.markdown("---")
+                st.write(f"**Modification de :** {selected_mood['Nom_Mood']}")
+
+                with st.form("update_delete_mood_form"):
+                    upd_mood_nom = st.text_input("Nom du Mood", value=selected_mood['Nom_Mood'], key="upd_mood_nom")
+                    upd_mood_description = st.text_area("Description Nuancée", value=selected_mood['Description_Nuance'], key="upd_mood_description")
+                    upd_mood_intensite = st.number_input("Niveau d'Intensité (1-5)", min_value=1, max_value=5, value=int(selected_mood['Niveau_Intensite']), step=1, key="upd_mood_intensite")
+                    upd_mood_mots_cles = st.text_input("Mots-clés Associés (séparés par des virgules)", value=selected_mood['Mots_Cles_Associes'], key="upd_mood_mots_cles")
+                    upd_mood_couleur = st.color_picker("Couleur Associée", value=selected_mood['Couleur_Associee'], key="upd_mood_couleur")
+                    upd_mood_tempo_range = st.text_input("Plage de Tempo Suggérée (ex: 80-120)", value=selected_mood['Tempo_Range_Suggerer'], key="upd_mood_tempo_range")
+
+                    col_mood_form_buttons = st.columns(2)
+                    with col_mood_form_buttons[0]:
+                        submit_update_mood = st.form_submit_button("Mettre à Jour le Mood")
+                    with col_mood_form_buttons[1]:
+                        submit_delete_mood = st.form_submit_button("Supprimer le Mood")
+
+                    if submit_update_mood:
+                        mood_data_update = {
+                            'Nom_Mood': upd_mood_nom,
+                            'Description_Nuance': upd_mood_description,
+                            'Niveau_Intensite': upd_mood_intensite,
+                            'Mots_Cles_Associes': upd_mood_mots_cles,
+                            'Couleur_Associee': upd_mood_couleur,
+                            'Tempo_Range_Suggerer': upd_mood_tempo_range
+                        }
+                        if sc.update_row_in_sheet(WORKSHEET_NAMES["MOODS_ET_EMOTIONS"], 'ID_Mood', mood_to_select, mood_data_update):
+                            st.success(f"Mood '{upd_mood_nom}' mis à jour avec succès !")
+                            st.experimental_rerun()
+                        else:
+                            st.error("Échec de la mise à jour du mood.")
+
+                    if submit_delete_mood:
+                        if st.warning(f"Voulez-vous vraiment supprimer le mood '{selected_mood['Nom_Mood']}' (ID: {mood_to_select}) ?"):
+                            if st.button("Confirmer la suppression", key="confirm_delete_mood"):
+                                if sc.delete_row_from_sheet(WORKSHEET_NAMES["MOODS_ET_EMOTIONS"], 'ID_Mood', mood_to_select):
+                                    st.success(f"Mood '{mood_to_select}' supprimé avec succès !")
+                                    st.experimental_rerun()
+                                else:
+                                    st.error("Échec de la suppression du mood.")
+        else:
+            st.info("Aucun mood à modifier ou supprimer pour le moment.")
 
 
-st.markdown("---")
-st.caption(f"© {datetime.now().year} CARTEL DES PLAISIRS - Propulsé par l'Oracle et la détermination du Gardien.")
+# --- Page : Instruments & Voix (Bibliothèques de l'Oracle) ---
+if st.session_state['current_page'] == 'Instruments & Voix':
+    st.header("🎤 Instruments & Voix")
+    st.write("Gérez les instruments orchestraux et les styles vocaux utilisés par l'Oracle.")
+
+    instruments_df = sc.get_all_instruments()
+    voix_styles_df = sc.get_all_voix_styles()
+
+    tab_instruments, tab_voix_styles = st.tabs(["Instruments Orchestraux", "Styles Vocaux"])
+
+    with tab_instruments:
+        st.subheader("Instruments Orchestraux")
+        if not instruments_df.empty:
+            display_dataframe(ut.format_dataframe_for_display(instruments_df), key="instruments_display")
+        else:
+            st.info("Aucun instrument enregistré pour le moment.")
+        # Ajouter ici les formulaires d'ajout/modification/suppression pour les instruments
+        st.info("Formulaires d'ajout/modification/suppression des instruments à implémenter ici (similaire aux autres onglets).")
+
+    with tab_voix_styles:
+        st.subheader("Styles Vocaux")
+        if not voix_styles_df.empty:
+            display_dataframe(ut.format_dataframe_for_display(voix_styles_df), key="voix_styles_display")
+        else:
+            st.info("Aucun style vocal enregistré pour le moment.")
+        # Ajouter ici les formulaires d'ajout/modification/suppression pour les styles vocaux
+        st.info("Formulaires d'ajout/modification/suppression des styles vocaux à implémenter ici (similaire aux autres onglets).")
+
+# --- Page : Structures de Chanson (Bibliothèques de l'Oracle) ---
+if st.session_state['current_page'] == 'Structures de Chanson':
+    st.header("🏛️ Structures de Chanson")
+    st.write("Gérez les modèles de structure de chanson que l'Oracle peut utiliser.")
+
+    structures_df = sc.get_all_structures_song()
+
+    tab_structures_view, tab_structures_add, tab_structures_edit = st.tabs(["Voir/Rechercher Structures", "Ajouter une Nouvelle Structure", "Mettre à Jour/Supprimer Structure"])
+
+    with tab_structures_view:
+        st.subheader("Voir et Rechercher des Structures de Chanson")
+        if not structures_df.empty:
+            search_structure_query = st.text_input("Rechercher par nom de structure ou schéma", key="search_structures")
+            if search_structure_query:
+                filtered_structures_df = structures_df[structures_df.apply(lambda row: search_structure_query.lower() in row.astype(str).str.lower().to_string(), axis=1)]
+            else:
+                filtered_structures_df = structures_df
+            display_dataframe(ut.format_dataframe_for_display(filtered_structures_df), key="structures_display")
+        else:
+            st.info("Aucune structure de chanson enregistrée pour le moment.")
+
+    with tab_structures_add:
+        st.subheader("Ajouter une Nouvelle Structure de Chanson")
+        with st.form("add_structure_form"):
+            new_structure_nom = st.text_input("Nom de la Structure", key="add_structure_nom")
+            new_structure_schema = st.text_area("Schéma Détaillé (ex: Intro > Couplet > Refrain)", key="add_structure_schema")
+            new_structure_notes_ia = st.text_area("Notes d'Application pour l'IA", key="add_structure_notes_ia")
+            submit_new_structure = st.form_submit_button("Ajouter la Structure")
+
+            if submit_new_structure:
+                new_structure_data = {
+                    'Nom_Structure': new_structure_nom,
+                    'Schema_Detaille': new_structure_schema,
+                    'Notes_Application_IA': new_structure_notes_ia
+                }
+                # Assuming sc.add_structure_song is defined
+                if sc.append_row_to_sheet(WORKSHEET_NAMES["STRUCTURES_SONG_UNIVERSELLES"], new_structure_data):
+                    st.success(f"Structure '{new_structure_nom}' ajoutée avec succès !")
+                    st.experimental_rerun()
+                else:
+                    st.error("Échec de l'ajout de la structure.")
+
+    with tab_structures_edit:
+        st.subheader("Mettre à Jour ou Supprimer une Structure de Chanson")
+        if not structures_df.empty:
+            structure_to_select = st.selectbox(
+                "Sélectionnez la Structure à modifier/supprimer",
+                structures_df['ID_Structure'].tolist(),
+                format_func=lambda x: f"{x} - {structures_df[structures_df['ID_Structure'] == x]['Nom_Structure'].iloc[0]}",
+                key="select_structure_to_edit"
+            )
+            if structure_to_select:
+                selected_structure = structures_df[structures_df['ID_Structure'] == structure_to_select].iloc[0]
+
+                st.markdown("---")
+                st.write(f"**Modification de :** {selected_structure['Nom_Structure']}")
+
+                with st.form("update_delete_structure_form"):
+                    upd_structure_nom = st.text_input("Nom de la Structure", value=selected_structure['Nom_Structure'], key="upd_structure_nom")
+                    upd_structure_schema = st.text_area("Schéma Détaillé", value=selected_structure['Schema_Detaille'], key="upd_structure_schema")
+                    upd_structure_notes_ia = st.text_area("Notes d'Application pour l'IA", value=selected_structure['Notes_Application_IA'], key="upd_structure_notes_ia")
+
+                    col_structure_form_buttons = st.columns(2)
+                    with col_structure_form_buttons[0]:
+                        submit_update_structure = st.form_submit_button("Mettre à Jour la Structure")
+                    with col_structure_form_buttons[1]:
+                        submit_delete_structure = st.form_submit_button("Supprimer la Structure")
+
+                    if submit_update_structure:
+                        structure_data_update = {
+                            'Nom_Structure': upd_structure_nom,
+                            'Schema_Detaille': upd_structure_schema,
+                            'Notes_Application_IA': upd_structure_notes_ia
+                        }
+                        if sc.update_row_in_sheet(WORKSHEET_NAMES["STRUCTURES_SONG_UNIVERSELLES"], 'ID_Structure', structure_to_select, structure_data_update):
+                            st.success(f"Structure '{upd_structure_nom}' mise à jour avec succès !")
+                            st.experimental_rerun()
+                        else:
+                            st.error("Échec de la mise à jour de la structure.")
+
+                    if submit_delete_structure:
+                        if st.warning(f"Voulez-vous vraiment supprimer la structure '{selected_structure['Nom_Structure']}' (ID: {structure_to_select}) ?"):
+                            if st.button("Confirmer la suppression", key="confirm_delete_structure"):
+                                if sc.delete_row_from_sheet(WORKSHEET_NAMES["STRUCTURES_SONG_UNIVERSELLES"], 'ID_Structure', structure_to_select):
+                                    st.success(f"Structure '{structure_to_select}' supprimée avec succès !")
+                                    st.experimental_rerun()
+                                else:
+                                    st.error("Échec de la suppression de la structure.")
+        else:
+            st.info("Aucune structure de chanson à modifier ou supprimer pour le moment.")
+
+
+# --- Page : Règles de Génération (Bibliothèques de l'Oracle) ---
+if st.session_state['current_page'] == 'Règles de Génération':
+    st.header("⚖️ Règles de Génération de l'Oracle")
+    st.write("Gérez les règles qui guident le comportement de l'Oracle lors de la génération de contenu.")
+
+    regles_df = sc.get_all_regles_generation()
+
+    tab_regles_view, tab_regles_add, tab_regles_edit = st.tabs(["Voir/Rechercher Règles", "Ajouter une Nouvelle Règle", "Mettre à Jour/Supprimer Règle"])
+
+    with tab_regles_view:
+        st.subheader("Voir et Rechercher des Règles de Génération")
+        if not regles_df.empty:
+            search_regle_query = st.text_input("Rechercher par nom de règle ou description", key="search_regles")
+            if search_regle_query:
+                filtered_regles_df = regles_df[regles_df.apply(lambda row: search_regle_query.lower() in row.astype(str).str.lower().to_string(), axis=1)]
+            else:
+                filtered_regles_df = regles_df
+            display_dataframe(ut.format_dataframe_for_display(filtered_regles_df), key="regles_display")
+        else:
+            st.info("Aucune règle de génération enregistrée pour le moment.")
+
+    with tab_regles_add:
+        st.subheader("Ajouter une Nouvelle Règle de Génération")
+        with st.form("add_regle_form"):
+            new_regle_type = st.text_input("Type de Règle (ex: Contrainte de Langage)", key="add_regle_type")
+            new_regle_description = st.text_area("Description de la Règle", key="add_regle_description")
+            new_regle_impact = st.text_input("Impact sur Génération (ex: Directive Pré-Génération)", key="add_regle_impact")
+            new_regle_statut_actif = st.checkbox("Statut Actif", value=True, key="add_regle_statut_actif")
+            submit_new_regle = st.form_submit_button("Ajouter la Règle")
+
+            if submit_new_regle:
+                new_regle_data = {
+                    'Type_Regle': new_regle_type,
+                    'Description_Regle': new_regle_description,
+                    'Impact_Sur_Generation': new_regle_impact,
+                    'Statut_Actif': 'VRAI' if new_regle_statut_actif else 'FAUX'
+                }
+                # Assuming sc.add_regle_generation is defined
+                if sc.append_row_to_sheet(WORKSHEET_NAMES["REGLES_DE_GENERATION_ORACLE"], new_regle_data):
+                    st.success(f"Règle '{new_regle_type}' ajoutée avec succès !")
+                    st.experimental_rerun()
+                else:
+                    st.error("Échec de l'ajout de la règle.")
+
+    with tab_regles_edit:
+        st.subheader("Mettre à Jour ou Supprimer une Règle de Génération")
+        if not regles_df.empty:
+            regle_to_select = st.selectbox(
+                "Sélectionnez la Règle à modifier/supprimer",
+                regles_df['ID_Regle'].tolist(),
+                format_func=lambda x: f"{x} - {regles_df[regles_df['ID_Regle'] == x]['Type_Regle'].iloc[0]}",
+                key="select_regle_to_edit"
+            )
+            if regle_to_select:
+                selected_regle = regles_df[regles_df['ID_Regle'] == regle_to_select].iloc[0]
+
+                st.markdown("---")
+                st.write(f"**Modification de :** {selected_regle['Type_Regle']}")
+
+                with st.form("update_delete_regle_form"):
+                    upd_regle_type = st.text_input("Type de Règle", value=selected_regle['Type_Regle'], key="upd_regle_type")
+                    upd_regle_description = st.text_area("Description de la Règle", value=selected_regle['Description_Regle'], key="upd_regle_description")
+                    upd_regle_impact = st.text_input("Impact sur Génération", value=selected_regle['Impact_Sur_Generation'], key="upd_regle_impact")
+                    upd_regle_statut_actif = st.checkbox("Statut Actif", value=ut.parse_boolean_string(selected_regle['Statut_Actif']), key="upd_regle_statut_actif")
+
+                    col_regle_form_buttons = st.columns(2)
+                    with col_regle_form_buttons[0]:
+                        submit_update_regle = st.form_submit_button("Mettre à Jour la Règle")
+                    with col_regle_form_buttons[1]:
+                        submit_delete_regle = st.form_submit_button("Supprimer la Règle")
+
+                    if submit_update_regle:
+                        regle_data_update = {
+                            'Type_Regle': upd_regle_type,
+                            'Description_Regle': upd_regle_description,
+                            'Impact_Sur_Generation': upd_regle_impact,
+                            'Statut_Actif': 'VRAI' if upd_regle_statut_actif else 'FAUX'
+                        }
+                        if sc.update_row_in_sheet(WORKSHEET_NAMES["REGLES_DE_GENERATION_ORACLE"], 'ID_Regle', regle_to_select, regle_data_update):
+                            st.success(f"Règle '{upd_regle_type}' mise à jour avec succès !")
+                            st.experimental_rerun()
+                        else:
+                            st.error("Échec de la mise à jour de la règle.")
+
+                    if submit_delete_regle:
+                        if st.warning(f"Voulez-vous vraiment supprimer la règle '{selected_regle['Type_Regle']}' (ID: {regle_to_select}) ?"):
+                            if st.button("Confirmer la suppression", key="confirm_delete_regle"):
+                                if sc.delete_row_from_sheet(WORKSHEET_NAMES["REGLES_DE_GENERATION_ORACLE"], 'ID_Regle', regle_to_select):
+                                    st.success(f"Règle '{regle_to_select}' supprimée avec succès !")
+                                    st.experimental_rerun()
+                                else:
+                                    st.error("Échec de la suppression de la règle.")
+        else:
+            st.info("Aucune règle de génération à modifier ou supprimer pour le moment.")
+
+
+# --- Page : Projets en Cours (Outils & Projets) ---
+if st.session_state['current_page'] == 'Projets en Cours':
+    st.header("🚧 Projets en Cours")
+    st.write("Suivez l'avancement de vos projets musicaux, de l'idée à la publication.")
+
+    projets_df = sc.get_all_projets_en_cours()
+
+    tab_projets_view, tab_projets_add, tab_projets_edit = st.tabs(["Voir/Rechercher Projets", "Ajouter un Nouveau Projet", "Mettre à Jour/Supprimer Projet"])
+
+    with tab_projets_view:
+        st.subheader("Voir et Rechercher des Projets")
+        if not projets_df.empty:
+            search_projet_query = st.text_input("Rechercher par nom de projet ou statut", key="search_projets")
+            if search_projet_query:
+                filtered_projets_df = projets_df[projets_df.apply(lambda row: search_projet_query.lower() in row.astype(str).str.lower().to_string(), axis=1)]
+            else:
+                filtered_projets_df = projets_df
+            display_dataframe(ut.format_dataframe_for_display(filtered_projets_df), key="projets_display")
+        else:
+            st.info("Aucun projet enregistré pour le moment.")
+
+    with tab_projets_add:
+        st.subheader("Ajouter un Nouveau Projet")
+        with st.form("add_projet_form"):
+            new_projet_nom = st.text_input("Nom du Projet", key="add_projet_nom")
+            new_projet_type = st.selectbox("Type de Projet", ["Single", "EP", "Album"], key="add_projet_type")
+            new_projet_statut = st.selectbox("Statut du Projet", ["En Idée", "En Production", "Mix/Master", "Promotion", "Terminé"], key="add_projet_statut")
+            new_projet_date_debut = st.date_input("Date de Début", value=datetime.now(), key="add_projet_date_debut")
+            new_projet_date_cible_fin = st.date_input("Date Cible de Fin", value=datetime.now() + pd.DateOffset(months=3), key="add_projet_date_cible_fin")
+            new_projet_morceaux_lies = st.text_input("IDs Morceaux Liés (séparés par des virgules)", key="add_projet_morceaux_lies")
+            new_projet_notes = st.text_area("Notes de Production", key="add_projet_notes")
+            new_projet_budget = st.number_input("Budget Estimé (€)", min_value=0.0, value=0.0, step=10.0, key="add_projet_budget")
+            submit_new_projet = st.form_submit_button("Ajouter le Projet")
+
+            if submit_new_projet:
+                new_projet_data = {
+                    'Nom_Projet': new_projet_nom,
+                    'Type_Projet': new_projet_type,
+                    'Statut_Projet': new_projet_statut,
+                    'Date_Debut': new_projet_date_debut.strftime('%Y-%m-%d'),
+                    'Date_Cible_Fin': new_projet_date_cible_fin.strftime('%Y-%m-%d'),
+                    'ID_Morceaux_Lies': new_projet_morceaux_lies,
+                    'Notes_Production': new_projet_notes,
+                    'Budget_Estime': new_projet_budget
+                }
+                if sc.append_row_to_sheet(WORKSHEET_NAMES["PROJETS_EN_COURS"], new_projet_data):
+                    st.success(f"Projet '{new_projet_nom}' ajouté avec succès !")
+                    st.experimental_rerun()
+                else:
+                    st.error("Échec de l'ajout du projet.")
+
+    with tab_projets_edit:
+        st.subheader("Mettre à Jour ou Supprimer un Projet")
+        if not projets_df.empty:
+            projet_to_select = st.selectbox(
+                "Sélectionnez le Projet à modifier/supprimer",
+                projets_df['ID_Projet'].tolist(),
+                format_func=lambda x: f"{x} - {projets_df[projets_df['ID_Projet'] == x]['Nom_Projet'].iloc[0]}",
+                key="select_projet_to_edit"
+            )
+            if projet_to_select:
+                selected_projet = projets_df[projets_df['ID_Projet'] == projet_to_select].iloc[0]
+
+                st.markdown("---")
+                st.write(f"**Modification de :** {selected_projet['Nom_Projet']}")
+
+                with st.form("update_delete_projet_form"):
+                    upd_projet_nom = st.text_input("Nom du Projet", value=selected_projet['Nom_Projet'], key="upd_projet_nom")
+                    upd_projet_type = st.selectbox("Type de Projet", ["Single", "EP", "Album"], index=["Single", "EP", "Album"].index(selected_projet['Type_Projet']), key="upd_projet_type")
+                    upd_projet_statut = st.selectbox("Statut du Projet", ["En Idée", "En Production", "Mix/Master", "Promotion", "Terminé"], index=["En Idée", "En Production", "Mix/Master", "Promotion", "Terminé"].index(selected_projet['Statut_Projet']), key="upd_projet_statut")
+                    upd_projet_date_debut = st.date_input("Date de Début", value=pd.to_datetime(selected_projet['Date_Debut']), key="upd_projet_date_debut")
+                    upd_projet_date_cible_fin = st.date_input("Date Cible de Fin", value=pd.to_datetime(selected_projet['Date_Cible_Fin']), key="upd_projet_date_cible_fin")
+                    upd_projet_morceaux_lies = st.text_input("IDs Morceaux Liés (séparés par des virgules)", value=selected_projet['ID_Morceaux_Lies'], key="upd_projet_morceaux_lies")
+                    upd_projet_notes = st.text_area("Notes de Production", value=selected_projet['Notes_Production'], key="upd_projet_notes")
+                    upd_projet_budget = st.number_input("Budget Estimé (€)", min_value=0.0, value=ut.safe_cast_to_float(selected_projet['Budget_Estime']) if ut.safe_cast_to_float(selected_projet['Budget_Estime']) is not None else 0.0, step=10.0, key="upd_projet_budget")
+
+                    col_projet_form_buttons = st.columns(2)
+                    with col_projet_form_buttons[0]:
+                        submit_update_projet = st.form_submit_button("Mettre à Jour le Projet")
+                    with col_projet_form_buttons[1]:
+                        submit_delete_projet = st.form_submit_button("Supprimer le Projet")
+
+                    if submit_update_projet:
+                        projet_data_update = {
+                            'Nom_Projet': upd_projet_nom,
+                            'Type_Projet': upd_projet_type,
+                            'Statut_Projet': upd_projet_statut,
+                            'Date_Debut': upd_projet_date_debut.strftime('%Y-%m-%d'),
+                            'Date_Cible_Fin': upd_projet_date_cible_fin.strftime('%Y-%m-%d'),
+                            'ID_Morceaux_Lies': upd_projet_morceaux_lies,
+                            'Notes_Production': upd_projet_notes,
+                            'Budget_Estime': upd_projet_budget
+                        }
+                        if sc.update_row_in_sheet(WORKSHEET_NAMES["PROJETS_EN_COURS"], 'ID_Projet', projet_to_select, projet_data_update):
+                            st.success(f"Projet '{upd_projet_nom}' mis à jour avec succès !")
+                            st.experimental_rerun()
+                        else:
+                            st.error("Échec de la mise à jour du projet.")
+
+                    if submit_delete_projet:
+                        if st.warning(f"Voulez-vous vraiment supprimer le projet '{selected_projet['Nom_Projet']}' (ID: {projet_to_select}) ?"):
+                            if st.button("Confirmer la suppression", key="confirm_delete_projet"):
+                                if sc.delete_row_from_sheet(WORKSHEET_NAMES["PROJETS_EN_COURS"], 'ID_Projet', projet_to_select):
+                                    st.success(f"Projet '{projet_to_select}' supprimé avec succès !")
+                                    st.experimental_rerun()
+                                else:
+                                    st.error("Échec de la suppression du projet.")
+        else:
+            st.info("Aucun projet à modifier ou supprimer pour le moment.")
+
+
+# --- Page : Outils IA Référencés (Outils & Projets) ---
+if st.session_state['current_page'] == 'Outils IA Référencés':
+    st.header("🛠️ Outils IA Référencés")
+    st.write("Consultez les outils IA externes référencés qui peuvent compléter les capacités de l'Architecte Ω.")
+
+    outils_ia_df = sc.get_all_outils_ia()
+
+    tab_outils_view, tab_outils_add, tab_outils_edit = st.tabs(["Voir/Rechercher Outils", "Ajouter un Nouvel Outil", "Mettre à Jour/Supprimer Outil"])
+
+    with tab_outils_view:
+        st.subheader("Voir et Rechercher des Outils IA")
+        if not outils_ia_df.empty:
+            search_outil_query = st.text_input("Rechercher par nom d'outil ou fonction", key="search_outils")
+            if search_outil_query:
+                filtered_outils_df = outils_ia_df[outils_ia_df.apply(lambda row: search_outil_query.lower() in row.astype(str).str.lower().to_string(), axis=1)]
+            else:
+                filtered_outils_df = outils_ia_df
+            display_dataframe(ut.format_dataframe_for_display(filtered_outils_df), key="outils_display")
+           
+            st.markdown("---")
+            st.subheader("Liens Directs vers les Outils")
+            for index, row in filtered_outils_df.iterrows():
+                if row['URL_Outil']:
+                    st.markdown(f"**[{row['Nom_Outil']}]({row['URL_Outil']})** : {row['Description_Fonctionnalite']}")
+        else:
+            st.info("Aucun outil IA enregistré pour le moment.")
+
+    with tab_outils_add:
+        st.subheader("Ajouter un Nouvel Outil IA")
+        with st.form("add_outil_ia_form"):
+            new_outil_nom = st.text_input("Nom de l'Outil", key="add_outil_nom")
+            new_outil_description = st.text_area("Description de la Fonctionnalité", key="add_outil_description")
+            new_outil_type = st.text_input("Type de Fonction (ex: Génération audio, Mastering)", key="add_outil_type")
+            new_outil_url = st.text_input("URL de l'Outil", key="add_outil_url")
+            new_outil_compat = st.checkbox("Compatibilité API (Oui/Non)", key="add_outil_compat")
+            new_outil_prix = st.text_input("Prix Approximatif", key="add_outil_prix")
+            new_outil_eval = st.number_input("Évaluation Gardien (1-5)", min_value=1, max_value=5, value=3, step=1, key="add_outil_eval")
+            new_outil_notes = st.text_area("Notes d'Utilisation", key="add_outil_notes")
+            submit_new_outil = st.form_submit_button("Ajouter l'Outil")
+
+            if submit_new_outil:
+                new_outil_data = {
+                    'Nom_Outil': new_outil_nom,
+                    'Description_Fonctionnalite': new_outil_description,
+                    'Type_Fonction': new_outil_type,
+                    'URL_Outil': new_outil_url,
+                    'Compatibilite_API': 'OUI' if new_outil_compat else 'NON',
+                    'Prix_Approximatif': new_outil_prix,
+                    'Evaluation_Gardien': new_outil_eval,
+                    'Notes_Utilisation': new_outil_notes
+                }
+                # Assuming sc.add_outil_ia is defined
+                if sc.append_row_to_sheet(WORKSHEET_NAMES["OUTILS_IA_REFERENCEMENT"], new_outil_data):
+                    st.success(f"Outil '{new_outil_nom}' ajouté avec succès !")
+                    st.experimental_rerun()
+                else:
+                    st.error("Échec de l'ajout de l'outil.")
+
+    with tab_outils_edit:
+        st.subheader("Mettre à Jour ou Supprimer un Outil IA")
+        if not outils_ia_df.empty:
+            outil_to_select = st.selectbox(
+                "Sélectionnez l'Outil IA à modifier/supprimer",
+                outils_ia_df['ID_Outil'].tolist(),
+                format_func=lambda x: f"{x} - {outils_ia_df[outils_ia_df['ID_Outil'] == x]['Nom_Outil'].iloc[0]}",
+                key="select_outil_to_edit"
+            )
+            if outil_to_select:
+                selected_outil = outils_ia_df[outils_ia_df['ID_Outil'] == outil_to_select].iloc[0]
+
+                st.markdown("---")
+                st.write(f"**Modification de :** {selected_outil['Nom_Outil']}")
+
+                with st.form("update_delete_outil_form"):
+                    upd_outil_nom = st.text_input("Nom de l'Outil", value=selected_outil['Nom_Outil'], key="upd_outil_nom")
+                    upd_outil_description = st.text_area("Description de la Fonctionnalité", value=selected_outil['Description_Fonctionnalite'], key="upd_outil_description")
+                    upd_outil_type = st.text_input("Type de Fonction", value=selected_outil['Type_Fonction'], key="upd_outil_type")
+                    upd_outil_url = st.text_input("URL de l'Outil", value=selected_outil['URL_Outil'], key="upd_outil_url")
+                    upd_outil_compat = st.checkbox("Compatibilité API (Oui/Non)", value=ut.parse_boolean_string(selected_outil['Compatibilite_API']), key="upd_outil_compat")
+                    upd_outil_prix = st.text_input("Prix Approximatif", value=selected_outil['Prix_Approximatif'], key="upd_outil_prix")
+                    upd_outil_eval = st.number_input("Évaluation Gardien (1-5)", min_value=1, max_value=5, value=int(selected_outil['Evaluation_Gardien']), step=1, key="upd_outil_eval")
+                    upd_outil_notes = st.text_area("Notes d'Utilisation", value=selected_outil['Notes_Utilisation'], key="upd_outil_notes")
+
+                    col_outil_form_buttons = st.columns(2)
+                    with col_outil_form_buttons[0]:
+                        submit_update_outil = st.form_submit_button("Mettre à Jour l'Outil")
+                    with col_outil_form_buttons[1]:
+                        submit_delete_outil = st.form_submit_button("Supprimer l'Outil")
+
+                    if submit_update_outil:
+                        outil_data_update = {
+                            'Nom_Outil': upd_outil_nom,
+                            'Description_Fonctionnalite': upd_outil_description,
+                            'Type_Fonction': upd_outil_type,
+                            'URL_Outil': upd_outil_url,
+                            'Compatibilite_API': 'OUI' if upd_outil_compat else 'NON',
+                            'Prix_Approximatif': upd_outil_prix,
+                            'Evaluation_Gardien': upd_outil_eval,
+                            'Notes_Utilisation': upd_outil_notes
+                        }
+                        if sc.update_row_in_sheet(WORKSHEET_NAMES["OUTILS_IA_REFERENCEMENT"], 'ID_Outil', outil_to_select, outil_data_update):
+                            st.success(f"Outil '{upd_outil_nom}' mis à jour avec succès !")
+                            st.experimental_rerun()
+                        else:
+                            st.error("Échec de la mise à jour de l'outil.")
+
+                    if submit_delete_outil:
+                        if st.warning(f"Voulez-vous vraiment supprimer l'outil '{selected_outil['Nom_Outil']}' (ID: {outil_to_select}) ?"):
+                            if st.button("Confirmer la suppression", key="confirm_delete_outil"):
+                                if sc.delete_row_from_sheet(WORKSHEET_NAMES["OUTILS_IA_REFERENCEMENT"], 'ID_Outil', outil_to_select):
+                                    st.success(f"Outil '{outil_to_select}' supprimé avec succès !")
+                                    st.experimental_rerun()
+                                else:
+                                    st.error("Échec de la suppression de l'outil.")
+        else:
+            st.info("Aucun outil IA à modifier ou supprimer pour le moment.")
+
+
+# --- Page : Timeline Événements (Outils & Projets) ---
+if st.session_state['current_page'] == 'Timeline Événements':
+    st.header("🗓️ Timeline des Événements Culturels")
+    st.write("Consultez et gérez les événements majeurs pour planifier vos lancements musicaux et campagnes promotionnelles.")
+
+    timeline_df = sc.get_all_timeline_evenements()
+
+    tab_timeline_view, tab_timeline_add, tab_timeline_edit = st.tabs(["Voir/Rechercher Événements", "Ajouter un Nouvel Événement", "Mettre à Jour/Supprimer Événement"])
+
+    with tab_timeline_view:
+        st.subheader("Voir et Rechercher des Événements")
+        if not timeline_df.empty:
+            search_timeline_query = st.text_input("Rechercher par nom d'événement ou genre", key="search_timeline")
+            if search_timeline_query:
+                filtered_timeline_df = timeline_df[timeline_df.apply(lambda row: search_timeline_query.lower() in row.astype(str).str.lower().to_string(), axis=1)]
+            else:
+                filtered_timeline_df = timeline_df
+            display_dataframe(ut.format_dataframe_for_display(filtered_timeline_df), key="timeline_display")
+        else:
+            st.info("Aucun événement enregistré pour le moment.")
+
+    with tab_timeline_add:
+        st.subheader("Ajouter un Nouvel Événement")
+        with st.form("add_timeline_event_form"):
+            new_event_nom = st.text_input("Nom de l'Événement", key="add_event_nom")
+            new_event_date_debut = st.date_input("Date de Début", value=datetime.now(), key="add_event_date_debut")
+            new_event_date_fin = st.date_input("Date de Fin", value=datetime.now(), key="add_event_date_fin")
+            new_event_type = st.selectbox("Type d'Événement", ["Festival", "Conférence", "Mois Thématique", "Cérémonie de récompenses", "Fête", "Journée Thématique"], key="add_event_type")
+            new_event_genre = st.text_input("Genre(s) Associé(s) (séparés par des virgules)", key="add_event_genre")
+            new_event_public = st.text_input("Public(s) Associé(s) (IDs séparés par virgules)", key="add_event_public")
+            new_event_notes = st.text_area("Notes Stratégiques", key="add_event_notes")
+            submit_new_event = st.form_submit_button("Ajouter l'Événement")
+
+            if submit_new_event:
+                new_event_data = {
+                    'Nom_Evenement': new_event_nom,
+                    'Date_Debut': new_event_date_debut.strftime('%Y-%m-%d'),
+                    'Date_Fin': new_event_date_fin.strftime('%Y-%m-%d'),
+                    'Type_Evenement': new_event_type,
+                    'Genre_Associe': new_event_genre,
+                    'Public_Associe': new_event_public,
+                    'Notes_Strategiques': new_event_notes
+                }
+                # Assuming sc.add_timeline_event is defined
+                if sc.append_row_to_sheet(WORKSHEET_NAMES["TIMELINE_EVENEMENTS_CULTURELS"], new_event_data):
+                    st.success(f"Événement '{new_event_nom}' ajouté avec succès !")
+                    st.experimental_rerun()
+                else:
+                    st.error("Échec de l'ajout de l'événement.")
+
+    with tab_timeline_edit:
+        st.subheader("Mettre à Jour ou Supprimer un Événement")
+        if not timeline_df.empty:
+            event_to_select = st.selectbox(
+                "Sélectionnez l'Événement à modifier/supprimer",
+                timeline_df['ID_Evenement'].tolist(),
+                format_func=lambda x: f"{x} - {timeline_df[timeline_df['ID_Evenement'] == x]['Nom_Evenement'].iloc[0]}",
+                key="select_event_to_edit"
+            )
+            if event_to_select:
+                selected_event = timeline_df[timeline_df['ID_Evenement'] == event_to_select].iloc[0]
+
+                st.markdown("---")
+                st.write(f"**Modification de :** {selected_event['Nom_Evenement']}")
+
+                with st.form("update_delete_event_form"):
+                    upd_event_nom = st.text_input("Nom de l'Événement", value=selected_event['Nom_Evenement'], key="upd_event_nom")
+                    upd_event_date_debut = st.date_input("Date de Début", value=pd.to_datetime(selected_event['Date_Debut']), key="upd_event_date_debut")
+                    upd_event_date_fin = st.date_input("Date de Fin", value=pd.to_datetime(selected_event['Date_Fin']), key="upd_event_date_fin")
+                    upd_event_type = st.selectbox("Type d'Événement", ["Festival", "Conférence", "Mois Thématique", "Cérémonie de récompenses", "Fête", "Journée Thématique"], index=["Festival", "Conférence", "Mois Thématique", "Cérémonie de récompenses", "Fête", "Journée Thématique"].index(selected_event['Type_Evenement']), key="upd_event_type")
+                    upd_event_genre = st.text_input("Genre(s) Associé(s)", value=selected_event['Genre_Associe'], key="upd_event_genre")
+                    upd_event_public = st.text_input("Public(s) Associé(s)", value=selected_event['Public_Associe'], key="upd_event_public")
+                    upd_event_notes = st.text_area("Notes Stratégiques", value=selected_event['Notes_Strategiques'], key="upd_event_notes")
+
+                    col_event_form_buttons = st.columns(2)
+                    with col_event_form_buttons[0]:
+                        submit_update_event = st.form_submit_button("Mettre à Jour l'Événement")
+                    with col_event_form_buttons[1]:
+                        submit_delete_event = st.form_submit_button("Supprimer l'Événement")
+
+                    if submit_update_event:
+                        event_data_update = {
+                            'Nom_Evenement': upd_event_nom,
+                            'Date_Debut': upd_event_date_debut.strftime('%Y-%m-%d'),
+                            'Date_Fin': upd_event_date_fin.strftime('%Y-%m-%d'),
+                            'Type_Evenement': upd_event_type,
+                            'Genre_Associe': upd_event_genre,
+                            'Public_Associe': upd_event_public,
+                            'Notes_Strategiques': upd_event_notes
+                        }
+                        if sc.update_row_in_sheet(WORKSHEET_NAMES["TIMELINE_EVENEMENTS_CULTURELS"], 'ID_Evenement', event_to_select, event_data_update):
+                            st.success(f"Événement '{upd_event_nom}' mis à jour avec succès !")
+                            st.experimental_rerun()
+                        else:
+                            st.error("Échec de la mise à jour de l'événement.")
+
+                    if submit_delete_event:
+                        if st.warning(f"Voulez-vous vraiment supprimer l'événement '{selected_event['Nom_Evenement']}' (ID: {event_to_select}) ?"):
+                            if st.button("Confirmer la suppression", key="confirm_delete_event"):
+                                if sc.delete_row_from_sheet(WORKSHEET_NAMES["TIMELINE_EVENEMENTS_CULTURELS"], 'ID_Evenement', event_to_select):
+                                    st.success(f"Événement '{event_to_select}' supprimé avec succès !")
+                                    st.experimental_rerun()
+                                else:
+                                    st.error("Échec de la suppression de l'événement.")
+        else:
+            st.info("Aucun événement à modifier ou supprimer pour le moment.")
+
+
+# --- Page : Historique de l'Oracle (Logging) ---
+if st.session_state['current_page'] == 'Historique de l'Oracle':
+    st.header("📚 Historique de l'Oracle")
+    st.write("Consultez l'historique de toutes vos interactions avec l'Oracle Architecte et évaluez ses générations.")
+
+    historique_df = sc.get_all_historique_generations()
+
+    tab_historique_view, tab_historique_feedback = st.tabs(["Voir Historique", "Donner du Feedback"])
+
+    with tab_historique_view:
+        st.subheader("Historique des Générations")
+        if not historique_df.empty:
+            search_hist_query = st.text_input("Rechercher dans l'historique", key="search_historique")
+            if search_hist_query:
+                filtered_hist_df = historique_df[historique_df.apply(lambda row: search_hist_query.lower() in row.astype(str).str.lower().to_string(), axis=1)]
+            else:
+                filtered_hist_df = historique_df
+            display_dataframe(ut.format_dataframe_for_display(filtered_hist_df), key="historique_display")
+        else:
+            st.info("Aucun historique de génération pour le moment.")
+
+    with tab_historique_feedback:
+        st.subheader("Donner du Feedback à l'Oracle")
+        if not historique_df.empty:
+            # Filtrer les entrées sans évaluation
+            unrated_generations = historique_df[historique_df['Evaluation_Manuelle'] == '']
+            if not unrated_generations.empty:
+                gen_to_feedback_id = st.selectbox(
+                    "Sélectionnez une génération à évaluer",
+                    unrated_generations['ID_GenLog'].tolist(),
+                    format_func=lambda x: f"{x} - {unrated_generations[unrated_generations['ID_GenLog'] == x]['Type_Generation'].iloc[0]} ({unrated_generations[unrated_generations['ID_GenLog'] == x]['Date_Heure'].iloc[0]})",
+                    key="select_gen_to_feedback"
+                )
+                if gen_to_feedback_id:
+                    selected_gen = unrated_generations[unrated_generations['ID_GenLog'] == gen_to_feedback_id].iloc[0]
+
+                    st.markdown("---")
+                    st.write(f"**Génération sélectionnée :** {selected_gen['Type_Generation']} du {selected_gen['Date_Heure']}")
+                    st.text_area("Prompt envoyé :", value=selected_gen['Prompt_Envoye_Full'], height=150, disabled=True)
+                    st.text_area("Réponse reçue :", value=selected_gen['Reponse_Recue_Full'], height=200, disabled=True)
+
+                    with st.form("feedback_form"):
+                        evaluation = st.slider("Évaluation de la qualité (1: Faible, 5: Excellente)", min_value=1, max_value=5, value=3, step=1, key="feedback_evaluation")
+                        commentaire = st.text_area("Commentaire ou suggestion d'amélioration", key="feedback_commentaire")
+                        tags_feedback = st.text_input("Tags de feedback (ex: 'trop long', 'mélodie parfaite', 'style non respecté')", key="feedback_tags")
+                       
+                        submit_feedback = st.form_submit_button("Soumettre le Feedback")
+
+                        if submit_feedback:
+                            feedback_data = {
+                                'Evaluation_Manuelle': str(evaluation), # Convertir en string pour le Google Sheet
+                                'Commentaire_Qualitatif': commentaire,
+                                'Tags_Feedback': tags_feedback
+                            }
+                            if sc.update_row_in_sheet(WORKSHEET_NAMES["HISTORIQUE_GENERATIONS"], 'ID_GenLog', gen_to_feedback_id, feedback_data):
+                                st.success("Feedback soumis avec succès ! L'Oracle vous remercie pour votre contribution.")
+                                st.experimental_rerun()
+                            else:
+                                st.error("Échec de la soumission du feedback.")
+            else:
+                st.info("Toutes les générations ont été évaluées, ou il n'y a pas encore d'historique.")
+        else:
+            st.info("Aucun historique de génération pour le moment.")
+
+
+# --- Page : Paroles Existantes (Gestion du Sanctuaire) ---
+if st.session_state['current_page'] == 'Paroles Existantes':
+    st.header("📜 Paroles Existantes (Manuelles)")
+    st.write("Consultez et gérez vos propres paroles de chansons que l'Oracle peut utiliser comme référence.")
+
+    paroles_existantes_df = sc.get_all_paroles_existantes()
+
+    tab_paroles_view, tab_paroles_add, tab_paroles_edit = st.tabs(["Voir/Rechercher Paroles", "Ajouter de Nouvelles Paroles", "Mettre à Jour/Supprimer Paroles"])
+
+    with tab_paroles_view:
+        st.subheader("Voir et Rechercher des Paroles Existantes")
+        if not paroles_existantes_df.empty:
+            search_paroles_query = st.text_input("Rechercher par titre ou contenu", key="search_paroles_existantes")
+            if search_paroles_query:
+                filtered_paroles_df = paroles_existantes_df[paroles_existantes_df.apply(lambda row: search_paroles_query.lower() in row.astype(str).str.lower().to_string(), axis=1)]
+            else:
+                filtered_paroles_df = paroles_existantes_df
+            display_dataframe(ut.format_dataframe_for_display(filtered_paroles_df), key="paroles_existantes_display")
+        else:
+            st.info("Aucune parole existante enregistrée pour le moment.")
+
+    with tab_paroles_add:
+        st.subheader("Ajouter de Nouvelles Paroles Manuelles")
+        with st.form("add_paroles_form"):
+            new_paroles_titre_morceau = st.text_input("Titre du Morceau (pour ces paroles)", key="add_paroles_titre_morceau")
+            new_paroles_artiste = st.text_input("Artiste Principal (ex: Le Gardien)", key="add_paroles_artiste")
+            new_paroles_genre = st.text_input("Genre Musical (pour référence)", key="add_paroles_genre")
+            new_paroles_texte = st.text_area("Collez les Paroles ici", height=300, key="add_paroles_texte")
+            new_paroles_notes = st.text_area("Notes (ex: A retravailler, version finale)", key="add_paroles_notes")
+            submit_new_paroles = st.form_submit_button("Ajouter les Paroles")
+
+            if submit_new_paroles:
+                new_paroles_data = {
+                    'Titre_Morceau': new_paroles_titre_morceau,
+                    'Artiste_Principal': new_paroles_artiste,
+                    'Genre_Musical': new_paroles_genre,
+                    'Paroles_Existantes': new_paroles_texte,
+                    'Notes': new_paroles_notes
+                }
+                # L'ID_Morceau sera généré par add_paroles_existantes si non fourni
+                if sc.add_paroles_existantes(new_paroles_data):
+                    st.success(f"Paroles pour '{new_paroles_titre_morceau}' ajoutées avec succès !")
+                    st.experimental_rerun()
+                else:
+                    st.error("Échec de l'ajout des paroles.")
+
+    with tab_paroles_edit:
+        st.subheader("Mettre à Jour ou Supprimer des Paroles Existantes")
+        if not paroles_existantes_df.empty:
+            paroles_to_select = st.selectbox(
+                "Sélectionnez les Paroles à modifier/supprimer",
+                paroles_existantes_df['ID_Morceau'].tolist(),
+                format_func=lambda x: f"{x} - {paroles_existantes_df[paroles_existantes_df['ID_Morceau'] == x]['Titre_Morceau'].iloc[0]}",
+                key="select_paroles_to_edit"
+            )
+            if paroles_to_select:
+                selected_paroles = paroles_existantes_df[paroles_existantes_df['ID_Morceau'] == paroles_to_select].iloc[0]
+
+                st.markdown("---")
+                st.write(f"**Modification de :** {selected_paroles['Titre_Morceau']}")
+
+                with st.form("update_delete_paroles_form"):
+                    upd_paroles_titre_morceau = st.text_input("Titre du Morceau", value=selected_paroles['Titre_Morceau'], key="upd_paroles_titre_morceau")
+                    upd_paroles_artiste = st.text_input("Artiste Principal", value=selected_paroles['Artiste_Principal'], key="upd_paroles_artiste")
+                    upd_paroles_genre = st.text_input("Genre Musical", value=selected_paroles['Genre_Musical'], key="upd_paroles_genre")
+                    upd_paroles_texte = st.text_area("Paroles", value=selected_paroles['Paroles_Existantes'], height=300, key="upd_paroles_texte")
+                    upd_paroles_notes = st.text_area("Notes", value=selected_paroles['Notes'], key="upd_paroles_notes")
+
+                    col_paroles_form_buttons = st.columns(2)
+                    with col_paroles_form_buttons[0]:
+                        submit_update_paroles = st.form_submit_button("Mettre à Jour les Paroles")
+                    with col_paroles_form_buttons[1]:
+                        submit_delete_paroles = st.form_submit_button("Supprimer les Paroles")
+
+                    if submit_update_paroles:
+                        paroles_data_update = {
+                            'Titre_Morceau': upd_paroles_titre_morceau,
+                            'Artiste_Principal': upd_paroles_artiste,
+                            'Genre_Musical': upd_paroles_genre,
+                            'Paroles_Existantes': upd_paroles_texte,
+                            'Notes': upd_paroles_notes
+                        }
+                        if sc.update_paroles_existantes(paroles_to_select, paroles_data_update):
+                            st.success(f"Paroles pour '{upd_paroles_titre_morceau}' mises à jour avec succès !")
+                            st.experimental_rerun()
+                        else:
+                            st.error("Échec de la mise à jour des paroles.")
+
+                    if submit_delete_paroles:
+                        if st.warning(f"Voulez-vous vraiment supprimer les paroles pour '{selected_paroles['Titre_Morceau']}' (ID: {paroles_to_select}) ?"):
+                            if st.button("Confirmer la suppression", key="confirm_delete_paroles"):
+                                if sc.delete_row_from_sheet(WORKSHEET_NAMES["PAROLES_EXISTANTES"], 'ID_Morceau', paroles_to_select):
+                                    st.success(f"Paroles '{paroles_to_select}' supprimées avec succès !")
+                                    st.experimental_rerun()
+                                else:
+                                    st.error("Échec de la suppression des paroles.")
+        else:
+            st.info("Aucune parole existante à modifier ou supprimer pour le moment.")
+
+# --- FIN DU FICHIER app.py --- 

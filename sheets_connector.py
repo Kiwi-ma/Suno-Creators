@@ -17,29 +17,23 @@ def get_gspread_client():
     Utilise les secrets Streamlit pour l'authentification du compte de service (clé JSON encodée en Base64).
     """
     try:
-        # Récupère la chaîne Base64 de la clé du compte de service
-        # Cette clé doit être configurée dans .streamlit/secrets.toml sous le nom GCP_SERVICE_ACCOUNT_B64
         service_account_info_b64 = st.secrets["GCP_SERVICE_ACCOUNT_B64"]
         
-        # Décode la chaîne Base64 en JSON (c'est ici que l'erreur précédente se situait dans ma logique)
-        # La clé privée dans le JSON original peut contenir des retours à la ligne '\n'.
-        # Lorsque le JSON est encodé en Base64, ces '\n' sont préservés.
-        # Après décodage Base64, nous obtenons la chaîne JSON originale.
-        # json.loads() va alors correctement interpréter les '\n' dans la clé privée.
+        # Décode la chaîne Base64 en JSON. Gère les retours à la ligne qui peuvent être dans la clé privée.
         service_account_info_json_str = base64.b64decode(service_account_info_b64).decode('utf-8')
         creds = json.loads(service_account_info_json_str)
         
-        # Initialise le client gspread avec le dictionnaire de credentials
         gc = gspread.service_account_from_dict(creds)
         return gc
     except KeyError:
         st.error("La clé 'GCP_SERVICE_ACCOUNT_B64' est manquante dans votre fichier .streamlit/secrets.toml. Veuillez la configurer.")
         st.stop()
+    except json.JSONDecodeError as e:
+        st.error(f"Erreur de décodage JSON de la clé de service. Assurez-vous que le contenu Base64 est un JSON valide: {e}")
+        st.stop()
     except Exception as e:
         st.error(f"Erreur d'authentification gspread. Assurez-vous que la clé GCP_SERVICE_ACCOUNT_B64 est correctement encodée et configurée: {e}")
-        # Pour le debug, on peut imprimer la chaîne décodée avant le chargement JSON si l'erreur persiste ici:
-        # st.code(service_account_info_json_str)
-        st.stop() # Arrête l'exécution de l'application si l'authentification échoue
+        st.stop()
 
 gc = get_gspread_client()
 
@@ -49,34 +43,43 @@ gc = get_gspread_client()
 def get_dataframe_from_sheet(sheet_name: str) -> pd.DataFrame:
     """
     Lit un onglet spécifique du Google Sheet et le retourne sous forme de DataFrame Pandas.
-    Vérifie la présence des colonnes attendues.
+    Vérifie la présence des colonnes attendues et tente des conversions de type.
     """
     try:
         spreadsheet = gc.open(SHEET_NAME)
         worksheet = spreadsheet.worksheet(WORKSHEET_NAMES[sheet_name])
-        data = worksheet.get_all_records()
-        df = pd.DataFrame(data)
+        
+        # Récupère toutes les données, y compris les en-têtes
+        data = worksheet.get_all_values()
+        if not data:
+            return pd.DataFrame(columns=EXPECTED_COLUMNS.get(WORKSHEET_NAMES[sheet_name], [])) # Retourne un DF vide avec les colonnes attendues
+        
+        headers = data[0]
+        records = data[1:]
+        df = pd.DataFrame(records, columns=headers)
 
-        # Vérifier si les colonnes attendues sont présentes
-        if sheet_name in EXPECTED_COLUMNS:
-            missing_cols = [col for col in EXPECTED_COLUMNS[sheet_name] if col not in df.columns]
-            if missing_cols:
-                st.warning(f"Attention: Les colonnes suivantes sont manquantes dans l'onglet '{sheet_name}': {', '.join(missing_cols)}. Veuillez les ajouter dans votre Google Sheet.")
-                # Ajouter les colonnes manquantes au DataFrame pour éviter les erreurs futures
-                for col in missing_cols:
-                    df[col] = ''
-            # Réordonner les colonnes selon EXPECTED_COLUMNS
-            # S'assurer que toutes les colonnes attendues sont présentes avant de réordonner
-            for col in EXPECTED_COLUMNS[sheet_name]:
-                if col not in df.columns:
-                    df[col] = '' # Ajoutez-les si manquantes avec une valeur par défaut
-            df = df[EXPECTED_COLUMNS[sheet_name]] # Réordonner
+        # Assurer que toutes les colonnes attendues sont présentes
+        expected_cols_for_sheet = EXPECTED_COLUMNS.get(WORKSHEET_NAMES[sheet_name], headers)
+        missing_cols = [col for col in expected_cols_for_sheet if col not in df.columns]
+        if missing_cols:
+            st.warning(f"Attention: Les colonnes suivantes sont manquantes dans l'onglet '{WORKSHEET_NAMES[sheet_name]}': {', '.join(missing_cols)}. Ajoutées avec des valeurs vides.")
+            for col in missing_cols:
+                df[col] = '' # Ajoute les colonnes manquantes
+        
+        # Réordonner les colonnes pour correspondre à l'ordre attendu
+        df = df[expected_cols_for_sheet]
 
         # Gérer les types de données spécifiques
-        if sheet_name == WORKSHEET_NAMES["REGLES_DE_GENERATION_ORACLE"]:
+        if WORKSHEET_NAMES[sheet_name] == WORKSHEET_NAMES["REGLES_DE_GENERATION_ORACLE"]:
             if 'Statut_Actif' in df.columns:
                 df['Statut_Actif'] = df['Statut_Actif'].apply(parse_boolean_string)
-        
+        if WORKSHEET_NAMES[sheet_name] == WORKSHEET_NAMES["MORCEAUX_GENERES"]:
+            if 'Favori' in df.columns:
+                df['Favori'] = df['Favori'].apply(parse_boolean_string)
+        if WORKSHEET_NAMES[sheet_name] == WORKSHEET_NAMES["OUTILS_IA_REFERENCEMENT"]:
+            if 'Compatibilite_API' in df.columns:
+                df['Compatibilite_API'] = df['Compatibilite_API'].apply(parse_boolean_string)
+
         # Pour les colonnes numériques, convertir en numérique si possible
         numeric_cols_to_check = {
             WORKSHEET_NAMES["STATISTIQUES_ORBITALES_SIMULEES"]: ['Ecoutes_Totales', 'J_aimes_Recus', 'Partages_Simules', 'Revenus_Simules_Streaming'],
@@ -84,14 +87,21 @@ def get_dataframe_from_sheet(sheet_name: str) -> pd.DataFrame:
             WORKSHEET_NAMES["PROJETS_EN_COURS"]: ['Budget_Estime'],
             WORKSHEET_NAMES["OUTILS_IA_REFERENCEMENT"]: ['Evaluation_Gardien']
         }
-        if sheet_name in numeric_cols_to_check:
-            for col in numeric_cols_to_check[sheet_name]:
+        if WORKSHEET_NAMES[sheet_name] in numeric_cols_to_check:
+            for col in numeric_cols_to_check[WORKSHEET_NAMES[sheet_name]]:
                 if col in df.columns:
                     if 'Revenus' in col or 'Budget' in col: # Float pour les montants
                         df[col] = df[col].apply(safe_cast_to_float)
                     else: # Int pour les autres chiffres
                         df[col] = df[col].apply(safe_cast_to_int)
 
+        # Conversion des colonnes de date au format YYYY-MM-DD
+        for col in ['Date_Creation', 'Date_Mise_A_Jour', 'Date_Sortie_Prevue', 'Date_Debut', 'Date_Cible_Fin', 'Date_Session', 'Date_Conseil', 'Date_Debut', 'Date_Fin', 'Date_Heure']:
+            if col in df.columns:
+                try:
+                    df[col] = pd.to_datetime(df[col], errors='coerce').dt.strftime('%Y-%m-%d').fillna('')
+                except Exception:
+                    pass # Laisser la colonne telle quelle si la conversion échoue
 
         return df
     except gspread.exceptions.SpreadsheetNotFound:
@@ -119,14 +129,26 @@ def append_row_to_sheet(sheet_name: str, row_data: dict) -> bool:
         
         # Assurer que toutes les colonnes attendues par l'onglet sont présentes dans row_data
         # Si une colonne attendue n'est pas dans row_data, elle sera ajoutée vide
-        # Ceci est particulièrement utile si de nouvelles colonnes sont ajoutées au modèle.
         expected_cols_for_sheet = EXPECTED_COLUMNS.get(WORKSHEET_NAMES[sheet_name], current_headers)
         
-        ordered_values = [row_data.get(col, '') for col in expected_cols_for_sheet]
+        # Créer la liste des valeurs dans le bon ordre
+        ordered_values = []
+        for col in expected_cols_for_sheet:
+            value = row_data.get(col, '')
+            # Convertir les booléens en 'VRAI'/'FAUX' pour Google Sheets
+            if isinstance(value, bool):
+                value = 'VRAI' if value else 'FAUX'
+            # Gérer les listes pour les transformer en chaînes
+            if isinstance(value, list):
+                value = ', '.join(map(str, value))
+            ordered_values.append(str(value)) # Convertir toutes les valeurs en string pour gspread
         
         worksheet.append_row(ordered_values)
         st.cache_data.clear() # Invalider le cache après une écriture
         return True
+    except gspread.exceptions.APIError as e:
+        st.error(f"Erreur API Google Sheets lors de l'ajout à '{sheet_name}': {e.response.text}")
+        return False
     except Exception as e:
         st.error(f"Erreur lors de l'ajout de la ligne à l'onglet '{sheet_name}': {e}")
         return False
@@ -143,25 +165,33 @@ def update_row_in_sheet(sheet_name: str, unique_id_col: str, unique_id_value: st
         worksheet = spreadsheet.worksheet(WORKSHEET_NAMES[sheet_name])
         
         # Trouver la colonne de l'ID unique
-        id_col_index = worksheet.find(unique_id_col).col
-        
+        # Utiliser `find` avec `re.compile` pour une correspondance exacte (ignorer les sous-chaînes)
+        # Assure-toi que la première ligne contient les en-têtes.
+        list_of_headers = worksheet.row_values(1)
+        try:
+            id_col_index = list_of_headers.index(unique_id_col) + 1 # +1 car gspread est 1-indexé
+        except ValueError:
+            st.error(f"La colonne '{unique_id_col}' est introuvable dans l'onglet '{sheet_name}'.")
+            return False
+
         # Trouver la cellule contenant la valeur de l'ID unique
         cell = worksheet.find(unique_id_value, in_column=id_col_index)
         row_index = cell.row
 
-        # Récupérer toutes les valeurs de l'en-tête pour s'assurer d'avoir le bon ordre
-        headers = worksheet.row_values(1)
-        
         # Récupérer les valeurs actuelles de la ligne pour ne modifier que les champs concernés
         current_row_values = worksheet.row_values(row_index)
         updated_values = current_row_values[:] # Copie pour modification
         
         for col_name, new_value in row_data.items():
-            if col_name in headers:
-                col_index = headers.index(col_name)
-                updated_values[col_index] = new_value
-            else:
-                st.warning(f"La colonne '{col_name}' n'existe pas dans l'onglet '{sheet_name}'. Ignoré lors de la mise à jour.")
+            if col_name in list_of_headers:
+                col_idx_to_update = list_of_headers.index(col_name)
+                # Convertir les booléens en 'VRAI'/'FAUX' pour Google Sheets
+                if isinstance(new_value, bool):
+                    new_value = 'VRAI' if new_value else 'FAUX'
+                # Gérer les listes pour les transformer en chaînes
+                if isinstance(new_value, list):
+                    new_value = ', '.join(map(str, new_value))
+                updated_values[col_idx_to_update] = str(new_value) # Convertir en string
 
         # Mettre à jour toute la ligne
         worksheet.update(f'A{row_index}', [updated_values])
@@ -169,6 +199,9 @@ def update_row_in_sheet(sheet_name: str, unique_id_col: str, unique_id_value: st
         return True
     except gspread.exceptions.CellNotFound:
         st.error(f"L'identifiant '{unique_id_value}' n'a pas été trouvé dans la colonne '{unique_id_col}' de l'onglet '{sheet_name}'.")
+        return False
+    except gspread.exceptions.APIError as e:
+        st.error(f"Erreur API Google Sheets lors de la mise à jour dans '{sheet_name}': {e.response.text}")
         return False
     except Exception as e:
         st.error(f"Erreur lors de la mise à jour de la ligne dans l'onglet '{sheet_name}': {e}")
@@ -182,7 +215,13 @@ def delete_row_from_sheet(sheet_name: str, unique_id_col: str, unique_id_value: 
         spreadsheet = gc.open(SHEET_NAME)
         worksheet = spreadsheet.worksheet(WORKSHEET_NAMES[sheet_name])
         
-        id_col_index = worksheet.find(unique_id_col).col
+        list_of_headers = worksheet.row_values(1)
+        try:
+            id_col_index = list_of_headers.index(unique_id_col) + 1
+        except ValueError:
+            st.error(f"La colonne '{unique_id_col}' est introuvable dans l'onglet '{sheet_name}'.")
+            return False
+
         cell = worksheet.find(unique_id_value, in_column=id_col_index)
         worksheet.delete_rows(cell.row)
         st.cache_data.clear() # Invalider le cache après une suppression
@@ -190,14 +229,20 @@ def delete_row_from_sheet(sheet_name: str, unique_id_col: str, unique_id_value: 
     except gspread.exceptions.CellNotFound:
         st.error(f"L'identifiant '{unique_id_value}' n'a pas été trouvé dans la colonne '{unique_id_col}' de l'onglet '{sheet_name}'.")
         return False
+    except gspread.exceptions.APIError as e:
+        st.error(f"Erreur API Google Sheets lors de la suppression dans '{sheet_name}': {e.response.text}")
+        return False
     except Exception as e:
         st.error(f"Erreur lors de la suppression de la ligne dans l'onglet '{sheet_name}': {e}")
         return False
 
-# --- Fonctions spécifiques pour chaque onglet (simplifiées ici pour les ajouts) ---
+# --- Fonctions spécifiques pour chaque onglet (simplifiées pour les ajouts/mises à jour) ---
+# Ces fonctions sont des wrappers qui ajoutent des ID uniques et des dates si nécessaire
+# avant d'appeler les fonctions append_row_to_sheet et update_row_in_sheet.
 
 def add_morceau_generes(data: dict) -> bool:
-    data['ID_Morceau'] = generate_unique_id('M')
+    if 'ID_Morceau' not in data or not data['ID_Morceau']:
+        data['ID_Morceau'] = generate_unique_id('M')
     data['Date_Creation'] = datetime.now().strftime('%Y-%m-%d')
     data['Date_Mise_A_Jour'] = datetime.now().strftime('%Y-%m-%d')
     return append_row_to_sheet("MORCEAUX_GENERES", data)
@@ -206,29 +251,23 @@ def update_morceau_generes(morceau_id: str, data: dict) -> bool:
     data['Date_Mise_A_Jour'] = datetime.now().strftime('%Y-%m-%d')
     return update_row_in_sheet("MORCEAUX_GENERES", 'ID_Morceau', morceau_id, data)
 
-def add_historique_generation(data: dict) -> bool:
-    data['ID_GenLog'] = generate_unique_id('LOG')
-    data['Date_Heure'] = datetime.now().strftime('%Y-%m-%d %H:%M:%S')
-    # Assurez-vous que 'user_id' est initialisé dans st.session_state si utilisé
-    data['ID_Utilisateur'] = st.session_state.get('user_id', 'Gardien')
-    return append_row_to_sheet("HISTORIQUE_GENERATIONS", data)
-
-# Ajout de fonctions pour les nouveaux onglets si nécessaire (par exemple, pour les onglets des bibliothèques)
-# Ces fonctions sont des wrappers pour append_row_to_sheet et update_row_in_sheet,
-# pour ajouter des ID uniques ou des dates si nécessaire, avant l'appel générique.
-
 def add_album(data: dict) -> bool:
-    data['ID_Album'] = generate_unique_id('A')
-    # Ajouter Date_Sortie_Prevue si non présente, ou s'assurer du format
-    if 'Date_Sortie_Prevue' not in data or not data['Date_Sortie_Prevue']:
+    if 'ID_Album' not in data or not data['ID_Album']:
+        data['ID_Album'] = generate_unique_id('A')
+    if 'Date_Sortie_Prevue' in data and isinstance(data['Date_Sortie_Prevue'], datetime):
+        data['Date_Sortie_Prevue'] = data['Date_Sortie_Prevue'].strftime('%Y-%m-%d')
+    elif 'Date_Sortie_Prevue' not in data or not data['Date_Sortie_Prevue']:
         data['Date_Sortie_Prevue'] = datetime.now().strftime('%Y-%m-%d')
     return append_row_to_sheet("ALBUMS_PLANETAIRES", data)
 
 def update_album(album_id: str, data: dict) -> bool:
+    if 'Date_Sortie_Prevue' in data and isinstance(data['Date_Sortie_Prevue'], datetime):
+        data['Date_Sortie_Prevue'] = data['Date_Sortie_Prevue'].strftime('%Y-%m-%d')
     return update_row_in_sheet("ALBUMS_PLANETAIRES", 'ID_Album', album_id, data)
 
 def add_artiste_ia(data: dict) -> bool:
-    data['ID_Artiste_IA'] = generate_unique_id('AI')
+    if 'ID_Artiste_IA' not in data or not data['ID_Artiste_IA']:
+        data['ID_Artiste_IA'] = generate_unique_id('AI')
     return append_row_to_sheet("ARTISTES_IA_COSMIQUES", data)
 
 def update_artiste_ia(artiste_id: str, data: dict) -> bool:
@@ -243,83 +282,114 @@ def update_paroles_existantes(morceau_id: str, data: dict) -> bool:
     return update_row_in_sheet("PAROLES_EXISTANTES", 'ID_Morceau', morceau_id, data)
 
 def add_style_musical(data: dict) -> bool:
-    data['ID_Style_Musical'] = generate_unique_id('SM')
+    if 'ID_Style_Musical' not in data or not data['ID_Style_Musical']:
+        data['ID_Style_Musical'] = generate_unique_id('SM')
     return append_row_to_sheet("STYLES_MUSICAUX_GALACTIQUES", data)
 
 def update_style_musical(style_id: str, data: dict) -> bool:
     return update_row_in_sheet("STYLES_MUSICAUX_GALACTIQUES", 'ID_Style_Musical', style_id, data)
 
 def add_style_lyrique(data: dict) -> bool:
-    data['ID_Style_Lyrique'] = generate_unique_id('SL')
+    if 'ID_Style_Lyrique' not in data or not data['ID_Style_Lyrique']:
+        data['ID_Style_Lyrique'] = generate_unique_id('SL')
     return append_row_to_sheet("STYLES_LYRIQUES_UNIVERS", data)
 
 def update_style_lyrique(style_id: str, data: dict) -> bool:
     return update_row_in_sheet("STYLES_LYRIQUES_UNIVERS", 'ID_Style_Lyrique', style_id, data)
 
 def add_theme(data: dict) -> bool:
-    data['ID_Theme'] = generate_unique_id('TH')
+    if 'ID_Theme' not in data or not data['ID_Theme']:
+        data['ID_Theme'] = generate_unique_id('TH')
     return append_row_to_sheet("THEMES_CONSTELLES", data)
 
 def update_theme(theme_id: str, data: dict) -> bool:
     return update_row_in_sheet("THEMES_CONSTELLES", 'ID_Theme', theme_id, data)
 
 def add_mood(data: dict) -> bool:
-    data['ID_Mood'] = generate_unique_id('MOOD')
+    if 'ID_Mood' not in data or not data['ID_Mood']:
+        data['ID_Mood'] = generate_unique_id('MOOD')
     return append_row_to_sheet("MOODS_ET_EMOTIONS", data)
 
 def update_mood(mood_id: str, data: dict) -> bool:
     return update_row_in_sheet("MOODS_ET_EMOTIONS", 'ID_Mood', mood_id, data)
 
 def add_instrument(data: dict) -> bool:
-    data['ID_Instrument'] = generate_unique_id('INST')
+    if 'ID_Instrument' not in data or not data['ID_Instrument']:
+        data['ID_Instrument'] = generate_unique_id('INST')
     return append_row_to_sheet("INSTRUMENTS_ORCHESTRAUX", data)
 
 def update_instrument(instrument_id: str, data: dict) -> bool:
     return update_row_in_sheet("INSTRUMENTS_ORCHESTRAUX", 'ID_Instrument', instrument_id, data)
 
 def add_voix_style(data: dict) -> bool:
-    data['ID_Vocal'] = generate_unique_id('VOC')
+    if 'ID_Vocal' not in data or not data['ID_Vocal']:
+        data['ID_Vocal'] = generate_unique_id('VOC')
     return append_row_to_sheet("VOIX_ET_STYLES_VOCAUX", data)
 
 def update_voix_style(vocal_id: str, data: dict) -> bool:
     return update_row_in_sheet("VOIX_ET_STYLES_VOCAUX", 'ID_Vocal', vocal_id, data)
 
 def add_structure_song(data: dict) -> bool:
-    data['ID_Structure'] = generate_unique_id('STR')
+    if 'ID_Structure' not in data or not data['ID_Structure']:
+        data['ID_Structure'] = generate_unique_id('STR')
     return append_row_to_sheet("STRUCTURES_SONG_UNIVERSELLES", data)
 
 def update_structure_song(structure_id: str, data: dict) -> bool:
     return update_row_in_sheet("STRUCTURES_SONG_UNIVERSELLES", 'ID_Structure', structure_id, data)
 
 def add_regle_generation(data: dict) -> bool:
-    data['ID_Regle'] = generate_unique_id('REGLE')
+    if 'ID_Regle' not in data or not data['ID_Regle']:
+        data['ID_Regle'] = generate_unique_id('REGLE')
     return append_row_to_sheet("REGLES_DE_GENERATION_ORACLE", data)
 
 def update_regle_generation(regle_id: str, data: dict) -> bool:
     return update_row_in_sheet("REGLES_DE_GENERATION_ORACLE", 'ID_Regle', regle_id, data)
 
 def add_projet_en_cours(data: dict) -> bool:
-    data['ID_Projet'] = generate_unique_id('PROJ')
-    # Les dates sont gérées par app.py avant d'appeler cette fonction
+    if 'ID_Projet' not in data or not data['ID_Projet']:
+        data['ID_Projet'] = generate_unique_id('PROJ')
+    if 'Date_Debut' in data and isinstance(data['Date_Debut'], datetime):
+        data['Date_Debut'] = data['Date_Debut'].strftime('%Y-%m-%d')
+    if 'Date_Cible_Fin' in data and isinstance(data['Date_Cible_Fin'], datetime):
+        data['Date_Cible_Fin'] = data['Date_Cible_Fin'].strftime('%Y-%m-%d')
     return append_row_to_sheet("PROJETS_EN_COURS", data)
 
 def update_projet_en_cours(projet_id: str, data: dict) -> bool:
+    if 'Date_Debut' in data and isinstance(data['Date_Debut'], datetime):
+        data['Date_Debut'] = data['Date_Debut'].strftime('%Y-%m-%d')
+    if 'Date_Cible_Fin' in data and isinstance(data['Date_Cible_Fin'], datetime):
+        data['Date_Cible_Fin'] = data['Date_Cible_Fin'].strftime('%Y-%m-%d')
     return update_row_in_sheet("PROJETS_EN_COURS", 'ID_Projet', projet_id, data)
 
 def add_outil_ia(data: dict) -> bool:
-    data['ID_Outil'] = generate_unique_id('IA')
+    if 'ID_Outil' not in data or not data['ID_Outil']:
+        data['ID_Outil'] = generate_unique_id('IA_TOOL') # Renommé pour éviter conflit avec ID_Artiste_IA
     return append_row_to_sheet("OUTILS_IA_REFERENCEMENT", data)
 
 def update_outil_ia(outil_id: str, data: dict) -> bool:
     return update_row_in_sheet("OUTILS_IA_REFERENCEMENT", 'ID_Outil', outil_id, data)
 
 def add_timeline_event(data: dict) -> bool:
-    data['ID_Evenement'] = generate_unique_id('EV')
-    # Les dates sont gérées par app.py avant d'appeler cette fonction
+    if 'ID_Evenement' not in data or not data['ID_Evenement']:
+        data['ID_Evenement'] = generate_unique_id('EV')
+    if 'Date_Debut' in data and isinstance(data['Date_Debut'], datetime):
+        data['Date_Debut'] = data['Date_Debut'].strftime('%Y-%m-%d')
+    if 'Date_Fin' in data and isinstance(data['Date_Fin'], datetime):
+        data['Date_Fin'] = data['Date_Fin'].strftime('%Y-%m-%d')
     return append_row_to_sheet("TIMELINE_EVENEMENTS_CULTURELS", data)
 
 def update_timeline_event(event_id: str, data: dict) -> bool:
+    if 'Date_Debut' in data and isinstance(data['Date_Debut'], datetime):
+        data['Date_Debut'] = data['Date_Debut'].strftime('%Y-%m-%d')
+    if 'Date_Fin' in data and isinstance(data['Date_Fin'], datetime):
+        data['Date_Fin'] = data['Date_Fin'].strftime('%Y-%m-%d')
     return update_row_in_sheet("TIMELINE_EVENEMENTS_CULTURELS", 'ID_Evenement', event_id, data)
+
+def add_historique_generation(data: dict) -> bool:
+    data['ID_GenLog'] = generate_unique_id('LOG')
+    data['Date_Heure'] = datetime.now().strftime('%Y-%m-%d %H:%M:%S')
+    data['ID_Utilisateur'] = st.session_state.get('user_id', 'Gardien') # Récupère l'ID utilisateur de la session
+    return append_row_to_sheet("HISTORIQUE_GENERATIONS", data)
 
 # Fonctions génériques pour obtenir toutes les données d'un onglet
 def get_all_morceaux():

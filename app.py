@@ -1333,64 +1333,104 @@ if st.session_state['current_page'] == 'Styles Musicaux':
         else:
             st.info("Aucun style musical à modifier ou supprimer pour le moment.")
 
-# --- Dupliquer et adapter ce bloc pour chaque bibliothèque : Styles Lyriques, Thèmes, Moods, Instruments, etc. ---
-# --- Page : Styles Lyriques (Bibliothèques de l'Oracle) ---
-if st.session_state['current_page'] == 'Styles Lyriques':
-    st.header("📝 Styles Lyriques")
-    st.write("Gérez les styles d'écriture lyrique utilisés par l'Oracle pour la génération de paroles.")
+# app.py - Suite du code (Complète et Finale)
 
-    styles_lyriques_df = sc.get_all_styles_lyriques()
+# --- Pages : Bibliothèques de l'Oracle (Gestion des Données de Référence) ---
 
-    tab_styles_lyriques_view, tab_styles_lyriques_add, tab_styles_lyriques_edit = st.tabs(["Voir/Rechercher Styles", "Ajouter un Nouveau Style", "Mettre à Jour/Supprimer Style"])
+# --- Page : Styles Musicaux (Bibliothèques de l'Oracle) ---
+if st.session_state['current_page'] == 'Styles Musicaux':
+    st.header("🎸 Styles Musicaux")
+    st.write("Gérez les styles musicaux utilisés par l'Oracle pour la génération de contenu.")
 
-    with tab_styles_lyriques_view:
-        st.subheader("Voir et Rechercher des Styles Lyriques")
-        if not styles_lyriques_df.empty:
-            search_style_lyrique_query = st.text_input("Rechercher par nom de style ou description", key="search_styles_lyriques")
-            if search_style_lyrique_query:
-                filtered_styles_lyriques_df = styles_lyriques_df[styles_lyriques_df.apply(lambda row: search_style_lyrique_query.lower() in row.astype(str).str.lower().to_string(), axis=1)]
+    styles_musicaux_df = sc.get_all_styles_musicaux()
+
+    tab_styles_view, tab_styles_add, tab_styles_edit = st.tabs(["Voir/Rechercher Styles", "Ajouter un Nouveau Style", "Mettre à Jour/Supprimer Style"])
+
+    with tab_styles_view:
+        st.subheader("Voir et Rechercher des Styles Musicaux")
+        if not styles_musicaux_df.empty:
+            search_style_query = st.text_input("Rechercher par nom de style ou description", key="search_styles")
+            if search_style_query:
+                filtered_styles_musicaux_df = styles_musicaux_df[styles_musicaux_df.apply(lambda row: search_style_query.lower() in row.astype(str).str.lower().to_string(), axis=1)]
             else:
-                filtered_styles_lyriques_df = styles_lyriques_df
-            display_dataframe(ut.format_dataframe_for_display(filtered_styles_lyriques_df), key="styles_lyriques_display")
+                filtered_styles_musicaux_df = styles_musicaux_df
+            display_dataframe(ut.format_dataframe_for_display(filtered_styles_musicaux_df), key="styles_display")
         else:
-            st.info("Aucun style lyrique enregistré pour le moment.")
+            st.info("Aucun style musical enregistré pour le moment.")
 
-    with tab_styles_lyriques_add:
-        st.subheader("Ajouter un Nouveau Style Lyrique")
-        with st.form("add_style_lyrique_form"):
-            new_style_lyrique_nom = st.text_input("Nom du Style Lyrique", key="add_style_lyrique_nom")
-            new_style_lyrique_description = st.text_area("Description du Style Lyrique", key="add_style_lyrique_description")
-            new_style_lyrique_exemples = st.text_area("Exemples Textuels (séparés par des sauts de ligne)", key="add_style_lyrique_exemples")
-            submit_new_style_lyrique = st.form_submit_button("Ajouter le Style Lyrique")
+    with tab_styles_add:
+        st.subheader("Ajouter un Nouveau Style Musical")
+        with st.form("add_style_musical_form"):
+            new_style_nom = st.text_input("Nom du Style Musical", key="add_style_nom")
+            new_style_description = st.text_area("Description Détaillée", key="add_style_description")
+            new_style_artistes_ref = st.text_input("Artistes Références (séparés par des virgules)", key="add_style_artistes_ref")
+            new_style_exemples_sonores = st.text_input("Exemples Sonores (URLs ou notes)", key="add_style_exemples_sonores")
 
-            if submit_new_style_lyrique:
-                new_style_lyrique_data = {
-                    'Nom_Style_Lyrique': new_style_lyrique_nom,
-                    'Description_Style': new_style_lyrique_description,
-                    'Exemples_Textuels': new_style_lyrique_exemples
+            submit_new_style = st.form_submit_button("Ajouter le Style Musical")
+
+            if submit_new_style:
+                new_style_data = {
+                    'Nom_Style_Musical': new_style_nom,
+                    'Description_Detaillee': new_style_description,
+                    'Artistes_References': new_style_artistes_ref,
+                    'Exemples_Sonores': new_style_exemples_sonores
                 }
-                if sc.add_style_lyrique(new_style_lyrique_data):
-                    st.success(f"Style lyrique '{new_style_lyrique_nom}' ajouté avec succès !")
+                if sc.add_style_musical(new_style_data):
+                    st.success(f"Style musical '{new_style_nom}' ajouté avec succès !")
                     st.experimental_rerun()
                 else:
-                    st.error("Échec de l'ajout du style lyrique.")
+                    st.error("Échec de l'ajout du style musical.")
 
-    with tab_styles_lyriques_edit:
-        st.subheader("Mettre à Jour ou Supprimer un Style Lyrique")
-        if not styles_lyriques_df.empty:
-            style_lyrique_to_select = st.selectbox(
-                "Sélectionnez le Style Lyrique à modifier/supprimer",
-                styles_lyriques_df['ID_Style_Lyrique'].tolist(),
-                format_func=lambda x: f"{x} - {styles_lyriques_df[styles_lyriques_df['ID_Style_Lyrique'] == x]['Nom_Style_Lyrique'].iloc[0]}",
-                key="select_style_lyrique_to_edit"
+    with tab_styles_edit:
+        st.subheader("Mettre à Jour ou Supprimer un Style Musical")
+        if not styles_musicaux_df.empty:
+            style_to_select = st.selectbox(
+                "Sélectionnez le Style Musical à modifier/supprimer",
+                styles_musicaux_df['ID_Style_Musical'].tolist(),
+                format_func=lambda x: f"{x} - {styles_musicaux_df[styles_musicaux_df['ID_Style_Musical'] == x]['Nom_Style_Musical'].iloc[0]}",
+                key="select_style_to_edit"
             )
-            if style_lyrique_to_select:
-                selected_style_lyrique = styles_lyriques_df[styles_lyriques_df['ID_Style_Lyrique'] == style_lyrique_to_select].iloc[0]
+            if style_to_select:
+                selected_style = styles_musicaux_df[styles_musicaux_df['ID_Style_Musical'] == style_to_select].iloc[0]
 
                 st.markdown("---")
-                st.write(f"**Modification de :** {selected_style_lyrique['Nom_Style_ 
+                st.write(f"**Modification de :** {selected_style['Nom_Style_Musical']}")
 
-# app.py - Suite du code de la Section 9
+                with st.form("update_delete_style_form"):
+                    upd_style_nom = st.text_input("Nom du Style Musical", value=selected_style['Nom_Style_Musical'], key="upd_style_nom")
+                    upd_style_description = st.text_area("Description Détaillée", value=selected_style['Description_Detaillee'], key="upd_style_description")
+                    upd_style_artistes_ref = st.text_input("Artistes Références (séparés par des virgules)", value=selected_style['Artistes_References'], key="upd_style_artistes_ref")
+                    upd_style_exemples_sonores = st.text_input("Exemples Sonores (URLs ou notes)", value=selected_style['Exemples_Sonores'], key="upd_style_exemples_sonores")
+
+                    col_style_form_buttons = st.columns(2)
+                    with col_style_form_buttons[0]:
+                        submit_update_style = st.form_submit_button("Mettre à Jour le Style Musical")
+                    with col_style_form_buttons[1]:
+                        submit_delete_style = st.form_submit_button("Supprimer le Style Musical")
+
+                    if submit_update_style:
+                        style_data_update = {
+                            'Nom_Style_Musical': upd_style_nom,
+                            'Description_Detaillee': upd_style_description,
+                            'Artistes_References': upd_style_artistes_ref,
+                            'Exemples_Sonores': upd_style_exemples_sonores
+                        }
+                        if sc.update_row_in_sheet(WORKSHEET_NAMES["STYLES_MUSICAUX_GALACTIQUES"], 'ID_Style_Musical', style_to_select, style_data_update):
+                            st.success(f"Style musical '{upd_style_nom}' mis à jour avec succès !")
+                            st.experimental_rerun()
+                        else:
+                            st.error("Échec de la mise à jour du style musical.")
+
+                    if submit_delete_style:
+                        if st.warning(f"Voulez-vous vraiment supprimer le style musical '{selected_style['Nom_Style_Musical']}' (ID: {style_to_select}) ?"):
+                            if st.button("Confirmer la suppression", key="confirm_delete_style"):
+                                if sc.delete_row_from_sheet(WORKSHEET_NAMES["STYLES_MUSICAUX_GALACTIQUES"], 'ID_Style_Musical', style_to_select):
+                                    st.success(f"Style musical '{style_to_select}' supprimé avec succès !")
+                                    st.experimental_rerun()
+                                else:
+                                    st.error("Échec de la suppression du style musical.")
+        else:
+            st.info("Aucun style musical à modifier ou supprimer pour le moment.")
 
 # --- Page : Styles Lyriques (Bibliothèques de l'Oracle) ---
 if st.session_state['current_page'] == 'Styles Lyriques':
@@ -1417,7 +1457,7 @@ if st.session_state['current_page'] == 'Styles Lyriques':
         st.subheader("Ajouter un Nouveau Style Lyrique")
         with st.form("add_style_lyrique_form"):
             new_style_lyrique_nom = st.text_input("Nom du Style Lyrique", key="add_style_lyrique_nom")
-            new_style_lyrique_description = st.text_area("Description du Style Lyrique", key="add_style_lyrique_description")
+            new_style_lyrique_description = st.text_area("Description Détaillée", key="add_style_lyrique_description")
             new_style_lyrique_auteurs = st.text_input("Auteurs Références (séparés par des virgules)", key="add_style_lyrique_auteurs")
             new_style_lyrique_exemples = st.text_area("Exemples Textuels Courts", key="add_style_lyrique_exemples")
             submit_new_style_lyrique = st.form_submit_button("Ajouter le Style Lyrique")
@@ -1429,10 +1469,7 @@ if st.session_state['current_page'] == 'Styles Lyriques':
                     'Auteurs_References': new_style_lyrique_auteurs,
                     'Exemples_Textuels_Courts': new_style_lyrique_exemples
                 }
-                # Assuming sc.add_style_lyrique is defined in sheets_connector.py
-                # This function needs to be created or adapted in sheets_connector.py if not already.
-                # Example: sc.add_style_lyrique will call sc.append_row_to_sheet("STYLES_LYRIQUES_UNIVERS", data)
-                if sc.append_row_to_sheet(WORKSHEET_NAMES["STYLES_LYRIQUES_UNIVERS"], new_style_lyrique_data):
+                if sc.add_style_lyrique(new_style_lyrique_data):
                     st.success(f"Style lyrique '{new_style_lyrique_nom}' ajouté avec succès !")
                     st.experimental_rerun()
                 else:
@@ -1455,7 +1492,7 @@ if st.session_state['current_page'] == 'Styles Lyriques':
 
                 with st.form("update_delete_style_lyrique_form"):
                     upd_style_lyrique_nom = st.text_input("Nom du Style Lyrique", value=selected_style_lyrique['Nom_Style_Lyrique'], key="upd_style_lyrique_nom")
-                    upd_style_lyrique_description = st.text_area("Description du Style Lyrique", value=selected_style_lyrique['Description_Detaillee'], key="upd_style_lyrique_description")
+                    upd_style_lyrique_description = st.text_area("Description Détaillée", value=selected_style_lyrique['Description_Detaillee'], key="upd_style_lyrique_description")
                     upd_style_lyrique_auteurs = st.text_input("Auteurs Références (séparés par des virgules)", value=selected_style_lyrique['Auteurs_References'], key="upd_style_lyrique_auteurs")
                     upd_style_lyrique_exemples = st.text_area("Exemples Textuels Courts", value=selected_style_lyrique['Exemples_Textuels_Courts'], key="upd_style_lyrique_exemples")
 
@@ -1472,8 +1509,6 @@ if st.session_state['current_page'] == 'Styles Lyriques':
                             'Auteurs_References': upd_style_lyrique_auteurs,
                             'Exemples_Textuels_Courts': upd_style_lyrique_exemples
                         }
-                        # Assuming sc.update_style_lyrique is defined in sheets_connector.py
-                        # Example: sc.update_style_lyrique calls sc.update_row_in_sheet(WORKSHEET_NAMES["STYLES_LYRIQUES_UNIVERS"], 'ID_Style_Lyrique', style_lyrique_to_select, data)
                         if sc.update_row_in_sheet(WORKSHEET_NAMES["STYLES_LYRIQUES_UNIVERS"], 'ID_Style_Lyrique', style_lyrique_to_select, style_lyrique_data_update):
                             st.success(f"Style lyrique '{upd_style_lyrique_nom}' mis à jour avec succès !")
                             st.experimental_rerun()
@@ -1526,8 +1561,7 @@ if st.session_state['current_page'] == 'Thèmes & Concepts':
                     'Description_Conceptuelle': new_theme_description,
                     'Mots_Cles_Associes': new_theme_mots_cles
                 }
-                # Assuming sc.add_theme is defined in sheets_connector.py
-                if sc.append_row_to_sheet(WORKSHEET_NAMES["THEMES_CONSTELLES"], new_theme_data):
+                if sc.add_theme(new_theme_data):
                     st.success(f"Thème '{new_theme_nom}' ajouté avec succès !")
                     st.experimental_rerun()
                 else:
@@ -1623,7 +1657,7 @@ if st.session_state['current_page'] == 'Moods & Émotions':
                     'Couleur_Associee': new_mood_couleur,
                     'Tempo_Range_Suggerer': new_mood_tempo_range
                 }
-                if sc.append_row_to_sheet(WORKSHEET_NAMES["MOODS_ET_EMOTIONS"], new_mood_data):
+                if sc.add_mood(new_mood_data):
                     st.success(f"Mood '{new_mood_nom}' ajouté avec succès !")
                     st.experimental_rerun()
                 else:
@@ -1701,8 +1735,53 @@ if st.session_state['current_page'] == 'Instruments & Voix':
             display_dataframe(ut.format_dataframe_for_display(instruments_df), key="instruments_display")
         else:
             st.info("Aucun instrument enregistré pour le moment.")
-        # Ajouter ici les formulaires d'ajout/modification/suppression pour les instruments
-        st.info("Formulaires d'ajout/modification/suppression des instruments à implémenter ici (similaire aux autres onglets).")
+       
+        # Forms for adding/updating/deleting instruments
+        st.markdown("##### Ajouter un Instrument")
+        with st.form("add_instrument_form"):
+            new_inst_nom = st.text_input("Nom de l'Instrument", key="add_inst_nom")
+            new_inst_type = st.text_input("Type d'Instrument", key="add_inst_type")
+            new_inst_sonorite = st.text_area("Sonorité Caractéristique", key="add_inst_sonorite")
+            new_inst_utilisation = st.text_area("Utilisation Prévalente", key="add_inst_utilisation")
+            new_inst_famille = st.text_input("Famille Sonore", key="add_inst_famille")
+            submit_new_inst = st.form_submit_button("Ajouter l'Instrument")
+            if submit_new_inst:
+                new_inst_data = {
+                    'Nom_Instrument': new_inst_nom, 'Type_Instrument': new_inst_type,
+                    'Sonorité_Caractéristique': new_inst_sonorite, 'Utilisation_Prevalente': new_inst_utilisation,
+                    'Famille_Sonore': new_inst_famille
+                }
+                if sc.add_instrument(new_inst_data):
+                    st.success(f"Instrument '{new_inst_nom}' ajouté.")
+                    st.experimental_rerun()
+                else: st.error("Erreur ajout instrument.")
+
+        st.markdown("##### Mettre à Jour/Supprimer un Instrument")
+        if not instruments_df.empty:
+            inst_to_select = st.selectbox("Sélectionnez l'Instrument", instruments_df['ID_Instrument'].tolist(), format_func=lambda x: f"{x} - {instruments_df[instruments_df['ID_Instrument'] == x]['Nom_Instrument'].iloc[0]}", key="select_inst_edit")
+            if inst_to_select:
+                selected_inst = instruments_df[instruments_df['ID_Instrument'] == inst_to_select].iloc[0]
+                with st.form("update_delete_instrument_form"):
+                    upd_inst_nom = st.text_input("Nom", value=selected_inst['Nom_Instrument'], key="upd_inst_nom")
+                    upd_inst_type = st.text_input("Type", value=selected_inst['Type_Instrument'], key="upd_inst_type")
+                    upd_inst_sonorite = st.text_area("Sonorité", value=selected_inst['Sonorité_Caractéristique'], key="upd_inst_sonorite")
+                    upd_inst_utilisation = st.text_area("Utilisation", value=selected_inst['Utilisation_Prevalente'], key="upd_inst_utilisation")
+                    upd_inst_famille = st.text_input("Famille", value=selected_inst['Famille_Sonore'], key="upd_inst_famille")
+                    col_inst_buttons = st.columns(2)
+                    with col_inst_buttons[0]: submit_upd_inst = st.form_submit_button("Mettre à Jour")
+                    with col_inst_buttons[1]: submit_del_inst = st.form_submit_button("Supprimer")
+                    if submit_upd_inst:
+                        upd_inst_data = {'Nom_Instrument': upd_inst_nom, 'Type_Instrument': upd_inst_type, 'Sonorité_Caractéristique': upd_inst_sonorite, 'Utilisation_Prevalente': upd_inst_utilisation, 'Famille_Sonore': upd_inst_famille}
+                        if sc.update_instrument(inst_to_select, upd_inst_data): st.success("Instrument mis à jour."); st.experimental_rerun()
+                        else: st.error("Erreur mise à jour.")
+                    if submit_del_inst:
+                        if st.warning(f"Supprimer '{selected_inst['Nom_Instrument']}' ?"):
+                            if st.button("Confirmer Suppression Instrument", key="confirm_del_inst"):
+                                if sc.delete_row_from_sheet(WORKSHEET_NAMES["INSTRUMENTS_ORCHESTRAUX"], 'ID_Instrument', inst_to_select):
+                                    st.success("Instrument supprimé."); st.experimental_rerun()
+                                else: st.error("Erreur suppression.")
+        else: st.info("Aucun instrument à modifier.")
+
 
     with tab_voix_styles:
         st.subheader("Styles Vocaux")
@@ -1710,8 +1789,53 @@ if st.session_state['current_page'] == 'Instruments & Voix':
             display_dataframe(ut.format_dataframe_for_display(voix_styles_df), key="voix_styles_display")
         else:
             st.info("Aucun style vocal enregistré pour le moment.")
-        # Ajouter ici les formulaires d'ajout/modification/suppression pour les styles vocaux
-        st.info("Formulaires d'ajout/modification/suppression des styles vocaux à implémenter ici (similaire aux autres onglets).")
+       
+        # Forms for adding/updating/deleting vocal styles
+        st.markdown("##### Ajouter un Style Vocal")
+        with st.form("add_vocal_style_form"):
+            new_vocal_type = st.text_input("Type Vocal Général", key="add_vocal_type")
+            new_vocal_tessiture = st.text_input("Tessiture Spécifique (ex: Soprano, N/A)", key="add_vocal_tessiture")
+            new_vocal_style_detaille = st.text_area("Style Vocal Détaillé", key="add_vocal_style_detaille")
+            new_vocal_caractere = st.text_input("Caractère Expressif", key="add_vocal_caractere")
+            new_vocal_effets = st.text_area("Effets Voix Souhaités", key="add_vocal_effets")
+            submit_new_vocal = st.form_submit_button("Ajouter le Style Vocal")
+            if submit_new_vocal:
+                new_vocal_data = {
+                    'Type_Vocal_General': new_vocal_type, 'Tessiture_Specifique': new_vocal_tessiture,
+                    'Style_Vocal_Detaille': new_vocal_style_detaille, 'Caractere_Expressif': new_vocal_caractere,
+                    'Effets_Voix_Souhaites': new_vocal_effets
+                }
+                if sc.add_voix_style(new_vocal_data):
+                    st.success(f"Style vocal '{new_vocal_style_detaille}' ajouté.")
+                    st.experimental_rerun()
+                else: st.error("Erreur ajout style vocal.")
+       
+        st.markdown("##### Mettre à Jour/Supprimer un Style Vocal")
+        if not voix_styles_df.empty:
+            vocal_to_select = st.selectbox("Sélectionnez le Style Vocal", voix_styles_df['ID_Vocal'].tolist(), format_func=lambda x: f"{x} - {voix_styles_df[voix_styles_df['ID_Vocal'] == x]['Style_Vocal_Detaille'].iloc[0]}", key="select_vocal_edit")
+            if vocal_to_select:
+                selected_vocal = voix_styles_df[voix_styles_df['ID_Vocal'] == vocal_to_select].iloc[0]
+                with st.form("update_delete_vocal_style_form"):
+                    upd_vocal_type = st.text_input("Type", value=selected_vocal['Type_Vocal_General'], key="upd_vocal_type")
+                    upd_vocal_tessiture = st.text_input("Tessiture", value=selected_vocal['Tessiture_Specifique'], key="upd_vocal_tessiture")
+                    upd_vocal_style_detaille = st.text_area("Style Détaillé", value=selected_vocal['Style_Vocal_Detaille'], key="upd_vocal_style_detaille")
+                    upd_vocal_caractere = st.text_input("Caractère", value=selected_vocal['Caractere_Expressif'], key="upd_vocal_caractere")
+                    upd_vocal_effets = st.text_area("Effets", value=selected_vocal['Effets_Voix_Souhaites'], key="upd_vocal_effets")
+                    col_vocal_buttons = st.columns(2)
+                    with col_vocal_buttons[0]: submit_upd_vocal = st.form_submit_button("Mettre à Jour")
+                    with col_vocal_buttons[1]: submit_del_vocal = st.form_submit_button("Supprimer")
+                    if submit_upd_vocal:
+                        upd_vocal_data = {'Type_Vocal_General': upd_vocal_type, 'Tessiture_Specifique': upd_vocal_tessiture, 'Style_Vocal_Detaille': upd_vocal_style_detaille, 'Caractere_Expressif': upd_vocal_caractere, 'Effets_Voix_Souhaites': upd_vocal_effets}
+                        if sc.update_voix_style(vocal_to_select, upd_vocal_data): st.success("Style vocal mis à jour."); st.experimental_rerun()
+                        else: st.error("Erreur mise à jour.")
+                    if submit_del_vocal:
+                        if st.warning(f"Supprimer '{selected_vocal['Style_Vocal_Detaille']}' ?"):
+                            if st.button("Confirmer Suppression Vocal", key="confirm_del_vocal"):
+                                if sc.delete_row_from_sheet(WORKSHEET_NAMES["VOIX_ET_STYLES_VOCAUX"], 'ID_Vocal', vocal_to_select):
+                                    st.success("Style vocal supprimé."); st.experimental_rerun()
+                                else: st.error("Erreur suppression.")
+        else: st.info("Aucun style vocal à modifier.")
+
 
 # --- Page : Structures de Chanson (Bibliothèques de l'Oracle) ---
 if st.session_state['current_page'] == 'Structures de Chanson':
@@ -1748,8 +1872,7 @@ if st.session_state['current_page'] == 'Structures de Chanson':
                     'Schema_Detaille': new_structure_schema,
                     'Notes_Application_IA': new_structure_notes_ia
                 }
-                # Assuming sc.add_structure_song is defined
-                if sc.append_row_to_sheet(WORKSHEET_NAMES["STRUCTURES_SONG_UNIVERSELLES"], new_structure_data):
+                if sc.add_structure_song(new_structure_data): # Assumant sc.add_structure_song est défini
                     st.success(f"Structure '{new_structure_nom}' ajoutée avec succès !")
                     st.experimental_rerun()
                 else:
@@ -1842,8 +1965,7 @@ if st.session_state['current_page'] == 'Règles de Génération':
                     'Impact_Sur_Generation': new_regle_impact,
                     'Statut_Actif': 'VRAI' if new_regle_statut_actif else 'FAUX'
                 }
-                # Assuming sc.add_regle_generation is defined
-                if sc.append_row_to_sheet(WORKSHEET_NAMES["REGLES_DE_GENERATION_ORACLE"], new_regle_data):
+                if sc.add_regle_generation(new_regle_data): # Assumant sc.add_regle_generation est défini
                     st.success(f"Règle '{new_regle_type}' ajoutée avec succès !")
                     st.experimental_rerun()
                 else:
@@ -1946,7 +2068,7 @@ if st.session_state['current_page'] == 'Projets en Cours':
                     'Notes_Production': new_projet_notes,
                     'Budget_Estime': new_projet_budget
                 }
-                if sc.append_row_to_sheet(WORKSHEET_NAMES["PROJETS_EN_COURS"], new_projet_data):
+                if sc.add_projet_en_cours(new_projet_data): # Assumant sc.add_projet_en_cours est défini
                     st.success(f"Projet '{new_projet_nom}' ajouté avec succès !")
                     st.experimental_rerun()
                 else:
@@ -2063,8 +2185,7 @@ if st.session_state['current_page'] == 'Outils IA Référencés':
                     'Evaluation_Gardien': new_outil_eval,
                     'Notes_Utilisation': new_outil_notes
                 }
-                # Assuming sc.add_outil_ia is defined
-                if sc.append_row_to_sheet(WORKSHEET_NAMES["OUTILS_IA_REFERENCEMENT"], new_outil_data):
+                if sc.add_outil_ia(new_outil_data): # Assumant sc.add_outil_ia est défini
                     st.success(f"Outil '{new_outil_nom}' ajouté avec succès !")
                     st.experimental_rerun()
                 else:
@@ -2173,8 +2294,7 @@ if st.session_state['current_page'] == 'Timeline Événements':
                     'Public_Associe': new_event_public,
                     'Notes_Strategiques': new_event_notes
                 }
-                # Assuming sc.add_timeline_event is defined
-                if sc.append_row_to_sheet(WORKSHEET_NAMES["TIMELINE_EVENEMENTS_CULTURELS"], new_event_data):
+                if sc.add_timeline_event(new_event_data): # Assumant sc.add_timeline_event est défini
                     st.success(f"Événement '{new_event_nom}' ajouté avec succès !")
                     st.experimental_rerun()
                 else:
@@ -2342,8 +2462,7 @@ if st.session_state['current_page'] == 'Paroles Existantes':
                     'Paroles_Existantes': new_paroles_texte,
                     'Notes': new_paroles_notes
                 }
-                # L'ID_Morceau sera généré par add_paroles_existantes si non fourni
-                if sc.add_paroles_existantes(new_paroles_data):
+                if sc.add_paroles_existantes(new_paroles_data): # Assumant sc.add_paroles_existantes est défini
                     st.success(f"Paroles pour '{new_paroles_titre_morceau}' ajoutées avec succès !")
                     st.experimental_rerun()
                 else:

@@ -43,7 +43,7 @@ WORKSHEET_NAMES = {
     "OUTILS_IA_REFERENCEMENT": "OUTILS_IA_REFERENCEMENT",
     "TIMELINE_EVENEMENTS_CULTURELS": "TIMELINE_EVENEMENTS_CULTURELS",
     "PAROLES_EXISTANTES": "PAROLES_EXISTANTES",
-    "HISTORIQUE_GENERATIONS": "HISTORIQUE_GENERATIONS" # Ajout de l'historique
+    "HISTORIQUE_GENERATIONS": "HISTORIQUE_GENERATIONS"
 }
 
 # --- Colonnes attendues pour chaque onglet (pour la validation des données) ---
@@ -58,7 +58,7 @@ EXPECTED_COLUMNS = {
         'Instrumentation_Principale', 'Ambiance_Sonore_Specifique', 'Effets_Production_Domination',
         'Type_Voix_Desiree', 'Style_Vocal_Desire', 'Caractere_Voix_Desire',
         'URL_Audio_Local', 'URL_Cover_Album', 'URL_Video_Clip_Associe', 'Mots_Cles_SEO',
-        'Description_Courte_Marketing'
+        'Description_Courte_Marketing', 'Favori' # **Ω CORRECTION**: Ajout de la colonne 'Favori'.
     ],
     WORKSHEET_NAMES["ALBUMS_PLANETAIRES"]: [
         'ID_Album', 'Nom_Album', 'Date_Sortie_Prevue', 'Statut_Album',
@@ -150,26 +150,3 @@ EXPECTED_COLUMNS = {
         'ID_Regle_Appliquee_Auto'
     ]
 }
-
-# --- Ajouts pour les fonctionnalités avancées ---
-
-# Pour l'Agent de Style Dynamique / Recommandation Intelligente
-# Nécessitera une logique dans gemini_oracle et app.py pour interpréter cet historique
-# et générer des prompts plus personnalisés.
-
-# Pour les Structures Harmoniques Complexes
-# Les fonctions de génération d'harmoniques dans gemini_oracle.py utiliseront INSTRUMENTS_ORCHESTRAUX et STRUCTURES_SONG_UNIVERSELLES comme base.
-
-# Pour le Co-pilote Créatif
-# Impliquera des interactions temps réel (ou quasi) entre app.py et gemini_oracle.py
-
-# Pour la Création Multimodale Synchronisée
-# Le prompt dans gemini_oracle.py devra orchestrer plusieurs types de générations en une seule requête logique.
-
-# Pour la Détection de Potentiel Viral / Recommandations de Niche
-# S'appuiera sur les données de STATISTIQUES_ORBITALES_SIMULEES et TIMELINE_EVENEMENTS_CULTURELS,
-# ainsi que de potentielles intégrations futures avec des APIs de données de streaming.
-
-# Pour le Système de "Projet Lumineux"
-# Nécessitera des mises à jour des champs dans PROJETS_EN_COURS et ARTISTES_IA_COSMIQUES
-# et une logique de score dans app.py.

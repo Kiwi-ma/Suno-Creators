@@ -10,19 +10,27 @@ import random
 from datetime import datetime
 
 # --- Configuration de l'API Gemini ---
-try:
-    genai.configure(api_key=st.secrets[GEMINI_API_KEY_NAME])
-    # Initialisation du modèle GenerativeModel pour le texte
-    _text_model = genai.GenerativeModel('gemini-2.5-flash')
-    # Pour les tâches plus créatives ou complexes
-    _creative_model = genai.GenerativeModel('gemini-2.5-pro')
-    st.session_state['gemini_initialized'] = True
-except Exception as e:
-    st.error(f"Erreur d'initialisation de l'API Gemini. Assurez-vous que votre clé API est correcte dans .streamlit/secrets.toml : {e}")
+# Récupère la clé API directement de Streamlit Cloud
+gemini_api_key = st.secrets.get(GEMINI_API_KEY_NAME)
+
+if gemini_api_key:
+    try:
+        genai.configure(api_key=gemini_api_key)
+        _text_model = genai.GenerativeModel('gemini-2.5-flash')
+        _creative_model = genai.GenerativeModel('gemini-2.5-pro')
+        st.session_state['gemini_initialized'] = True
+    except Exception as e:
+        st.error(f"Erreur d'initialisation de l'API Gemini. Vérifiez votre clé : {e}")
+        st.session_state['gemini_initialized'] = False
+        _text_model = None
+        _creative_model = None
+else:
+    st.error(f"La clé API Gemini '{GEMINI_API_KEY_NAME}' est manquante dans les secrets de votre application Streamlit Cloud.")
     st.session_state['gemini_initialized'] = False
     _text_model = None
-    _creative_model = None # Fallback pour éviter les erreurs si non initialisé
+    _creative_model = None
 
+# Le reste du fichier (fonctions _generate_content, generate_song_lyrics, etc.) reste IDENTIQUE.
 
 # --- Fonctions d'Interaction avec l'Oracle Gemini ---
 

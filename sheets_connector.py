@@ -1,369 +1,389 @@
-# sheets_connector.py (Mise à jour)
+# sheets_connector.py
+
 import streamlit as st
 import gspread
-# REMOVE THESE IMPORTS, no longer needed for service account auth
-# from google.oauth2.credentials import Credentials
-# from google_auth_oauthlib.flow import InstalledAppFlow
-# from google.auth.transport.requests import Request
-import os
 import pandas as pd
+from config import SHEET_NAME, WORKSHEET_NAMES, EXPECTED_COLUMNS
 from datetime import datetime
-import random
+from utils import generate_unique_id, parse_boolean_string, safe_cast_to_int, safe_cast_to_float
+import base64
+import json # Nécessaire pour décoder le JSON de la clé
 
-# Importe les configurations
-import config
-import utils
-
-
-# Variables globales pour le client gspread et la feuille de calcul
-gc = None
-spreadsheet = None
-worksheet_oeuvres = None
-
-@st.cache_resource
-def get_gspread_client_and_worksheets():
-    global gc, spreadsheet, worksheet_oeuvres
-    
-    # Récupérer les identifiants du compte de service depuis Streamlit secrets
-    # Assurez-vous que votre fichier secrets.toml aura la structure suivante pour le service account:
-    # [gsheets_service_account]
-    # type = "service_account"
-    # project_id = "your-gcp-project-id"
-    # private_key_id = "your-private-key-id"
-    # private_key = "your-private-key"
-    # client_email = "your-service-account-email"
-    # client_id = "your-client-id"
-    # auth_uri = "https://accounts.google.com/o/oauth2/auth"
-    # token_uri = "https://oauth2.googleapis.com/token"
-    # auth_provider_x509_cert_url = "https://www.googleapis.com/oauth2/v1/certs"
-    # client_x509_cert_url = "your-client-cert-url"
-    
-    # Charger les identifiants sous forme de dict JSON
+# --- Initialisation de la connexion à Google Sheets ---
+@st.cache_resource(ttl=3600) # Mise en cache de la connexion pendant 1 heure
+def get_gspread_client():
+    """
+    Initialise et retourne un client gspread authentifié.
+    Utilise les secrets Streamlit pour l'authentification du compte de service (clé JSON encodée en Base64).
+    """
     try:
-        creds_json = {
-            "type": st.secrets["gsheets_service_account"]["type"],
-            "project_id": st.secrets["gsheets_service_account"]["project_id"],
-            "private_key_id": st.secrets["gsheets_service_account"]["private_key_id"],
-            "private_key": st.secrets["gsheets_service_account"]["private_key"].replace("\\n", "\n"), # Important: les sauts de ligne doivent être réels
-            "client_email": st.secrets["gsheets_service_account"]["client_email"],
-            "client_id": st.secrets["gsheets_service_account"]["client_id"],
-            "auth_uri": st.secrets["gsheets_service_account"]["auth_uri"],
-            "token_uri": st.secrets["gsheets_service_account"]["token_uri"],
-            "auth_provider_x509_cert_url": st.secrets["gsheets_service_account"]["auth_provider_x509_cert_url"],
-            "client_x509_cert_url": st.secrets["gsheets_service_account"]["client_x509_cert_url"]
-        }
+        # Récupère la chaîne Base64 de la clé du compte de service
+        # Cette clé doit être configurée dans .streamlit/secrets.toml sous le nom GCP_SERVICE_ACCOUNT_B64
+        service_account_info_b64 = st.secrets["GCP_SERVICE_ACCOUNT_B64"]
         
-        # Authentifier gspread avec les identifiants du compte de service
-        gc = gspread.service_account_from_dict(creds_json)
+        # Décode la chaîne Base64 en JSON (c'est ici que l'erreur précédente se situait dans ma logique)
+        # La clé privée dans le JSON original peut contenir des retours à la ligne '\n'.
+        # Lorsque le JSON est encodé en Base64, ces '\n' sont préservés.
+        # Après décodage Base64, nous obtenons la chaîne JSON originale.
+        # json.loads() va alors correctement interpréter les '\n' dans la clé privée.
+        service_account_info_json_str = base64.b64decode(service_account_info_b64).decode('utf-8')
+        creds = json.loads(service_account_info_json_str)
         
-        spreadsheet = gc.open_by_url(config.SPREADSHEET_URL)
-        worksheet_oeuvres = spreadsheet.worksheet(config.WORKSHEET_NAME_OEUVRES)
-        
-        print("Connexion à Google Sheets établie avec succès via Compte de Service.")
-        return gc, spreadsheet, worksheet_oeuvres
-    except Exception as e:
-        st.error(f"Erreur lors de la connexion à Google Sheets via Compte de Service : {e}")
-        st.error("Vérifiez la configuration de 'gsheets_service_account' dans votre fichier .streamlit/secrets.toml.")
-        st.stop() # Arrête l'application si l'authentification échoue
-
-    try:
-        gc = gspread.authorize(creds)
-        spreadsheet = gc.open_by_url(config.SPREADSHEET_URL)
-        worksheet_oeuvres = spreadsheet.worksheet(config.WORKSHEET_NAME_OEUVRES)
-    except gspread.exceptions.SpreadsheetNotFound:
-        st.error(f"Feuille de calcul introuvable à l'URL : {config.SPREADSHEET_URL}. Veuillez vérifier l'URL et les permissions.")
-        st.stop()
-    except gspread.exceptions.WorksheetNotFound as e:
-        st.error(f"L'une des feuilles de calcul nécessaires n'a pas été trouvée : {e}. Veuillez vous assurer que les onglets spécifiés dans config.py existent.")
+        # Initialise le client gspread avec le dictionnaire de credentials
+        gc = gspread.service_account_from_dict(creds)
+        return gc
+    except KeyError:
+        st.error("La clé 'GCP_SERVICE_ACCOUNT_B64' est manquante dans votre fichier .streamlit/secrets.toml. Veuillez la configurer.")
         st.stop()
     except Exception as e:
-        st.error(f"Erreur inattendue lors de la connexion à Google Sheets : {e}")
-        st.stop()
+        st.error(f"Erreur d'authentification gspread. Assurez-vous que la clé GCP_SERVICE_ACCOUNT_B64 est correctement encodée et configurée: {e}")
+        # Pour le debug, on peut imprimer la chaîne décodée avant le chargement JSON si l'erreur persiste ici:
+        # st.code(service_account_info_json_str)
+        st.stop() # Arrête l'exécution de l'application si l'authentification échoue
 
-    return gc, spreadsheet, worksheet_oeuvres
+gc = get_gspread_client()
 
-@st.cache_data(ttl=3600)
-def load_data_from_sheet(worksheet_name):
-    """Charge toutes les données d'un onglet spécifique depuis Google Sheets."""
+# --- Fonctions d'interaction avec Google Sheets ---
+
+@st.cache_data(ttl=600) # Mise en cache des données lues pendant 10 minutes
+def get_dataframe_from_sheet(sheet_name: str) -> pd.DataFrame:
+    """
+    Lit un onglet spécifique du Google Sheet et le retourne sous forme de DataFrame Pandas.
+    Vérifie la présence des colonnes attendues.
+    """
     try:
-        if spreadsheet is None:
-            raise Exception("Google Sheets client not initialized. Call get_gspread_client_and_worksheets() first.")
-
-        current_worksheet = spreadsheet.worksheet(worksheet_name)
-        data = current_worksheet.get_all_records()
+        spreadsheet = gc.open(SHEET_NAME)
+        worksheet = spreadsheet.worksheet(WORKSHEET_NAMES[sheet_name])
+        data = worksheet.get_all_records()
         df = pd.DataFrame(data)
 
-        if worksheet_name == config.WORKSHEET_NAME_OEUVRES:
-            expected_cols = [
-                'ID_Oeuvre', 'Titre_Original', 'Titre_Optimise', 'Date_Creation', 'Statut_Publication',
-                'Description_Courte', 'URL_Texte_Local', 'Prompt_Image_Genere', 'URL_Image_Couverture',
-                'Prompt_Image_1', 'Prompt_Image_2', 'Prompt_Image_3',
-                'Titre_Suggere_1', 'Titre_Suggere_2', 'Titre_Suggere_3', 'Resume_Suggere', 'Tags_Suggérés',
-                'Tags_Manuels', 'Plateforme_Publication', 'Notes_Editeur', 'Texte_Genere',
-                'ID_Parent_Serie', 'Numero_Tome'
-            ]
-            for col in expected_cols:
-                if col not in df.columns:
+        # Vérifier si les colonnes attendues sont présentes
+        if sheet_name in EXPECTED_COLUMNS:
+            missing_cols = [col for col in EXPECTED_COLUMNS[sheet_name] if col not in df.columns]
+            if missing_cols:
+                st.warning(f"Attention: Les colonnes suivantes sont manquantes dans l'onglet '{sheet_name}': {', '.join(missing_cols)}. Veuillez les ajouter dans votre Google Sheet.")
+                # Ajouter les colonnes manquantes au DataFrame pour éviter les erreurs futures
+                for col in missing_cols:
                     df[col] = ''
-            df['Numero_Tome'] = pd.to_numeric(df['Numero_Tome'], errors='coerce').fillna(0)
+            # Réordonner les colonnes selon EXPECTED_COLUMNS
+            # S'assurer que toutes les colonnes attendues sont présentes avant de réordonner
+            for col in EXPECTED_COLUMNS[sheet_name]:
+                if col not in df.columns:
+                    df[col] = '' # Ajoutez-les si manquantes avec une valeur par défaut
+            df = df[EXPECTED_COLUMNS[sheet_name]] # Réordonner
 
-        elif worksheet_name == config.WORKSHEET_NAME_TENDANCES:
-            expected_cols_tendances = ['Date_Analyse', 'Niche_Identifiee', 'Popularite_Score', 'Competition_Niveau', 'Mots_Cles_Associes', 'Tendances_Generales', 'Source_Information']
-            for col in expected_cols_tendances:
-                if col not in df.columns:
-                    df[col] = ''
-            df['Date_Analyse'] = pd.to_datetime(df['Date_Analyse'], errors='coerce')
-            df['Popularite_Score'] = pd.to_numeric(df['Popularite_Score'], errors='coerce').fillna(0)
+        # Gérer les types de données spécifiques
+        if sheet_name == WORKSHEET_NAMES["REGLES_DE_GENERATION_ORACLE"]:
+            if 'Statut_Actif' in df.columns:
+                df['Statut_Actif'] = df['Statut_Actif'].apply(parse_boolean_string)
+        
+        # Pour les colonnes numériques, convertir en numérique si possible
+        numeric_cols_to_check = {
+            WORKSHEET_NAMES["STATISTIQUES_ORBITALES_SIMULEES"]: ['Ecoutes_Totales', 'J_aimes_Recus', 'Partages_Simules', 'Revenus_Simules_Streaming'],
+            WORKSHEET_NAMES["MOODS_ET_EMOTIONS"]: ['Niveau_Intensite'],
+            WORKSHEET_NAMES["PROJETS_EN_COURS"]: ['Budget_Estime'],
+            WORKSHEET_NAMES["OUTILS_IA_REFERENCEMENT"]: ['Evaluation_Gardien']
+        }
+        if sheet_name in numeric_cols_to_check:
+            for col in numeric_cols_to_check[sheet_name]:
+                if col in df.columns:
+                    if 'Revenus' in col or 'Budget' in col: # Float pour les montants
+                        df[col] = df[col].apply(safe_cast_to_float)
+                    else: # Int pour les autres chiffres
+                        df[col] = df[col].apply(safe_cast_to_int)
 
-        elif worksheet_name == config.WORKSHEET_NAME_PERFORMANCE:
-            expected_cols_performance = ['ID_Oeuvre', 'Mois_Annee', 'Revenus_Nets', 'Vues_Telechargements', 'Engagement_Score', 'Commentaires_Mois']
-            for col in expected_cols_performance:
-                if col not in df.columns:
-                    df[col] = ''
-            df['Mois_Annee'] = pd.to_datetime(df['Mois_Annee'], format='%m-%Y', errors='coerce')
-            df['Revenus_Nets'] = pd.to_numeric(df['Revenus_Nets'], errors='coerce').fillna(0)
-            df['Vues_Telechargements'] = pd.to_numeric(df['Vues_Telechargements'], errors='coerce').fillna(0)
-            df['Engagement_Score'] = pd.to_numeric(df['Engagement_Score'], errors='coerce').fillna(0)
-
-        elif worksheet_name == config.WORKSHEET_NAME_UNIVERS:
-            expected_cols_univers = ['ID_Univers', 'Nom_Univers', 'Description_Globale', 'Elements_Cles_Intrigue', 'Personnages_Cles', 'Notes_Internes']
-            for col in expected_cols_univers:
-                if col not in df.columns:
-                    df[col] = ''
-
-        elif worksheet_name == config.WORKSHEET_NAME_STYLES:
-            expected_cols_styles = ['ID_Style', 'Nom_Style', 'Description_Style', 'Exemples_Textuels', 'Niveau_Explicite_Defaut', 'Notes_Internes']
-            for col in expected_cols_styles:
-                if col not in df.columns:
-                    df[col] = ''
 
         return df
+    except gspread.exceptions.SpreadsheetNotFound:
+        st.error(f"Le Google Sheet '{SHEET_NAME}' est introuvable. Veuillez vérifier le nom ou s'il est partagé avec le compte de service.")
+        st.stop()
     except gspread.exceptions.WorksheetNotFound:
-        st.warning(f"L'onglet '{worksheet_name}' n'a pas été trouvé. Veuillez le créer dans votre Google Sheet.")
-        return pd.DataFrame()
+        st.error(f"L'onglet '{WORKSHEET_NAMES[sheet_name]}' est introuvable dans le Google Sheet '{SHEET_NAME}'.")
+        st.stop()
     except Exception as e:
-        st.error(f"Erreur lors du chargement des données depuis Google Sheets (onglet '{worksheet_name}') : {e}")
-        return pd.DataFrame()
+        st.error(f"Erreur lors de la lecture de l'onglet '{sheet_name}': {e}")
+        st.stop()
 
 
-def append_rows_to_sheet(worksheet_name, data_list):
+def append_row_to_sheet(sheet_name: str, row_data: dict) -> bool:
     """
-    Ajoute une liste de dictionnaires (chaque dict est une ligne) à un onglet donné.
-    Les clés des dictionnaires doivent correspondre aux en-têtes de colonnes.
+    Ajoute une nouvelle ligne à l'onglet spécifié.
+    row_data doit être un dictionnaire où les clés correspondent aux en-têtes de colonnes.
     """
     try:
-        if spreadsheet is None:
-            raise Exception("Google Sheets client not initialized. Call get_gspread_client_and_worksheets() first.")
+        spreadsheet = gc.open(SHEET_NAME)
+        worksheet = spreadsheet.worksheet(WORKSHEET_NAMES[sheet_name])
 
-        target_worksheet = spreadsheet.worksheet(worksheet_name)
-        headers = target_worksheet.row_values(1)
-
-        rows_to_append = []
-        for item_data in data_list:
-            row = []
-            for header in headers:
-                value = item_data.get(header, "")
-                row.append(value)
-            rows_to_append.append(row)
-
-        if rows_to_append:
-            target_worksheet.append_rows(rows_to_append)
-            st.success(f"{len(rows_to_append)} nouvelles entrées ajoutées à l'onglet '{worksheet_name}'!")
-            return True
-        else:
-            st.info(f"Aucune donnée à ajouter à l'onglet '{worksheet_name}'.")
-            return False
-    except gspread.exceptions.WorksheetNotFound:
-        st.error(f"Erreur: L'onglet '{worksheet_name}' n'a pas été trouvé dans Google Sheets.")
-        return False
-    except Exception as e:
-        st.error(f"Erreur lors de l'ajout de données à l'onglet '{worksheet_name}' : {e}")
-        return False
-
-def save_new_oeuvre_to_sheet(generated_text, image_prompts, launch_kit,
-                             titre_original, description_courte, id_parent_serie="", numero_tome=""):
-    """
-    Sauvegarde une nouvelle œuvre générée dans l'onglet 'Oeuvres' et localement.
-    """
-    try:
-        if worksheet_oeuvres is None:
-            raise Exception("Google Sheets client not initialized for Oeuvres worksheet. Call get_gspread_client_and_worksheets() first.")
-
-        oeuvre_id = f"OEUVRE_{datetime.now().strftime('%Y%m%d%H%M%S')}_{random.randint(1000,9999)}"
-        date_creation = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
-
-        clean_title_for_filename = utils.clean_filename_slug(titre_original)
-        local_text_filename = f"{oeuvre_id}_{clean_title_for_filename}.txt"
-        local_text_filepath_full = os.path.join(config.TEXTS_FOLDER, local_text_filename) # Full path for saving
-        url_texte_local = os.path.join(os.path.basename(config.ASSETS_FOLDER), os.path.basename(config.TEXTS_FOLDER), local_text_filename) # Relative path to assets folder for sheet
-
-        try:
-            with open(local_text_filepath_full, "w", encoding="utf-8") as f:
-                f.write(generated_text)
-            st.info(f"Texte sauvegardé localement : `{local_text_filepath_full}`")
-        except Exception as e:
-            st.error(f"Erreur lors de la sauvegarde locale du texte : {e}")
-            url_texte_local = "Erreur de sauvegarde locale" # Mark it in sheet if saving failed
-
-
-        new_oeuvre_data = {
-            'ID_Oeuvre': oeuvre_id,
-            'Titre_Original': titre_original,
-            'Titre_Optimise': launch_kit.get('titles', [''])[0],
-            'Date_Creation': date_creation,
-            'Statut_Publication': 'Brouillon',
-            'Description_Courte': description_courte if description_courte else launch_kit.get('summary', ''),
-            'URL_Texte_Local': url_texte_local,
-            'Prompt_Image_Genere': '',
-            'URL_Image_Couverture': '',
-            'Prompt_Image_1': image_prompts[0] if len(image_prompts) > 0 else '',
-            'Prompt_Image_2': image_prompts[1] if len(image_prompts) > 1 else '',
-            'Prompt_Image_3': image_prompts[2] if len(image_prompts) > 2 else '',
-            'Titre_Suggere_1': launch_kit.get('titles', [''])[0],
-            'Titre_Suggere_2': launch_kit.get('titles', ['', ''])[1],
-            'Titre_Suggere_3': launch_kit.get('titles', ['', '', ''])[2],
-            'Resume_Suggere': launch_kit.get('summary', ''),
-            'Tags_Suggérés': ", ".join(launch_kit.get('tags', [])),
-            'Tags_Manuels': '',
-            'Plateforme_Publication': 'Non publié',
-            'Notes_Editeur': '',
-            'Texte_Genere': generated_text,
-            'ID_Parent_Serie': id_parent_serie,
-            'Numero_Tome': numero_tome
-        }
-
-        success = append_rows_to_sheet(config.WORKSHEET_NAME_OEUVRES, [new_oeuvre_data])
-        return success
-
-    except Exception as e:
-        st.error(f"Erreur globale lors de la sauvegarde de la nouvelle œuvre : {e}")
-        return False
-
-
-def update_oeuvre_in_sheet(oeuvre_id, updates_dict):
-    """Met à jour les champs spécifiés d'une œuvre existante dans l'onglet 'Oeuvres'."""
-    try:
-        if worksheet_oeuvres is None:
-            raise Exception("Google Sheets client not initialized for Oeuvres worksheet. Call get_gspread_client_and_worksheets() first.")
-
-        headers = worksheet_oeuvres.row_values(1)
-        col_map = {header: i+1 for i, header in enumerate(headers)}
-
-        try:
-            cell = worksheet_oeuvres.find(oeuvre_id, in_column=col_map['ID_Oeuvre'])
-            row_index = cell.row
-        except gspread.exceptions.CellNotFound:
-            st.error(f"Erreur : Œuvre avec ID '{oeuvre_id}' non trouvée dans Google Sheets.")
-            return False
-
-        updates_list = []
-        for col_name, value in updates_dict.items():
-            if col_name in col_map:
-                if col_name == 'Numero_Tome':
-                    try:
-                        value = int(value) if pd.notna(value) and str(value).strip() != '' else ''
-                    except ValueError:
-                        value = ''
-                updates_list.append({
-                    'range': gspread.utils.rowcol_to_a1(row_index, col_map[col_name]),
-                    'values': [[value]]
-                })
-
-        if updates_list:
-            worksheet_oeuvres.batch_update(updates_list)
-            st.success(f"Œuvre '{oeuvre_id}' mise à jour avec succès dans Google Sheets!")
-            return True
-        else:
-            st.info("Aucune modification à appliquer.")
-            return False
-
-    except Exception as e:
-        st.error(f"Erreur lors de la mise à jour de l'œuvre dans Google Sheets : {e}")
-        return False
-
-# Fonction générique pour mettre à jour une ligne par ID dans n'importe quel onglet
-def update_row_by_id(worksheet_name, id_column, row_id, updates_dict):
-    """
-    Met à jour les champs spécifiés d'une ligne existante dans un onglet donné, basée sur un ID.
-    :param worksheet_name: Nom de l'onglet à modifier.
-    :param id_column: Nom de la colonne contenant l'ID unique (ex: 'ID_Univers', 'ID_Style').
-    :param row_id: La valeur de l'ID à trouver.
-    :param updates_dict: Dictionnaire {nom_colonne: nouvelle_valeur} des champs à mettre à jour.
-    """
-    try:
-        if spreadsheet is None:
-            raise Exception("Google Sheets client not initialized. Call get_gspread_client_and_worksheets() first.")
-
-        target_worksheet = spreadsheet.worksheet(worksheet_name)
-        headers = target_worksheet.row_values(1)
-        col_map = {header: i+1 for i, header in enumerate(headers)}
-
-        search_value = str(row_id)
-        try:
-            cell = target_worksheet.find(search_value, in_column=col_map[id_column])
-            row_index = cell.row
-        except gspread.exceptions.CellNotFound:
-            st.error(f"Erreur : Entrée avec ID '{row_id}' non trouvée dans l'onglet '{worksheet_name}'.")
-            return False
-
-        updates_list = []
-        for col_name, value in updates_dict.items():
-            if col_name in col_map:
-                updates_list.append({
-                    'range': gspread.utils.rowcol_to_a1(row_index, col_map[col_name]),
-                    'values': [[value]]
-                })
-
-        if updates_list:
-            target_worksheet.batch_update(updates_list)
-            st.success(f"Entrée '{row_id}' mise à jour avec succès dans l'onglet '{worksheet_name}'!")
-            return True
-        else:
-            st.info("Aucune modification à appliquer.")
-            return False
-
-    except gspread.exceptions.WorksheetNotFound:
-        st.error(f"Erreur: L'onglet '{worksheet_name}' n'a pas été trouvé dans Google Sheets.")
-        return False
-    except Exception as e:
-        st.error(f"Erreur lors de la mise à jour de l'entrée dans l'onglet '{worksheet_name}' : {e}")
-        return False
-
-# NOUVEAU: Fonction générique pour supprimer une ligne par ID
-def delete_row_by_id(worksheet_name, id_column, row_id):
-    """
-    Supprime une ligne d'un onglet donné, basée sur un ID.
-    :param worksheet_name: Nom de l'onglet à modifier.
-    :param id_column: Nom de la colonne contenant l'ID unique (ex: 'ID_Univers', 'ID_Style').
-    :param row_id: La valeur de l'ID de la ligne à supprimer.
-    """
-    try:
-        if spreadsheet is None:
-            raise Exception("Google Sheets client not initialized. Call get_gspread_client_and_worksheets() first.")
-
-        target_worksheet = spreadsheet.worksheet(worksheet_name)
-        headers = target_worksheet.row_values(1)
-        col_map = {header: i+1 for i, header in enumerate(headers)}
-
-        search_value = str(row_id)
-        try:
-            cell = target_worksheet.find(search_value, in_column=col_map[id_column])
-            row_index = cell.row
-        except gspread.exceptions.CellNotFound:
-            st.warning(f"Impossible de supprimer : Entrée avec ID '{row_id}' non trouvée dans l'onglet '{worksheet_name}'.")
-            return False
-
-        target_worksheet.delete_rows(row_index)
-        st.success(f"Entrée '{row_id}' supprimée avec succès de l'onglet '{worksheet_name}'!")
+        # Récupérer les en-têtes actuels de la feuille pour s'assurer de l'ordre et des colonnes manquantes
+        current_headers = worksheet.row_values(1)
+        
+        # Assurer que toutes les colonnes attendues par l'onglet sont présentes dans row_data
+        # Si une colonne attendue n'est pas dans row_data, elle sera ajoutée vide
+        # Ceci est particulièrement utile si de nouvelles colonnes sont ajoutées au modèle.
+        expected_cols_for_sheet = EXPECTED_COLUMNS.get(WORKSHEET_NAMES[sheet_name], current_headers)
+        
+        ordered_values = [row_data.get(col, '') for col in expected_cols_for_sheet]
+        
+        worksheet.append_row(ordered_values)
+        st.cache_data.clear() # Invalider le cache après une écriture
         return True
+    except Exception as e:
+        st.error(f"Erreur lors de l'ajout de la ligne à l'onglet '{sheet_name}': {e}")
+        return False
 
-    except gspread.exceptions.WorksheetNotFound:
-        st.error(f"Erreur: L'onglet '{worksheet_name}' n'a pas été trouvé dans Google Sheets pour la suppression.")
+def update_row_in_sheet(sheet_name: str, unique_id_col: str, unique_id_value: str, row_data: dict) -> bool:
+    """
+    Met à jour une ligne existante dans l'onglet spécifié, identifiée par une colonne et une valeur unique.
+    unique_id_col: Nom de la colonne qui contient l'identifiant unique (ex: 'ID_Morceau').
+    unique_id_value: La valeur de l'identifiant unique de la ligne à mettre à jour.
+    row_data: Dictionnaire des données à mettre à jour (clés = en-têtes de colonnes).
+    """
+    try:
+        spreadsheet = gc.open(SHEET_NAME)
+        worksheet = spreadsheet.worksheet(WORKSHEET_NAMES[sheet_name])
+        
+        # Trouver la colonne de l'ID unique
+        id_col_index = worksheet.find(unique_id_col).col
+        
+        # Trouver la cellule contenant la valeur de l'ID unique
+        cell = worksheet.find(unique_id_value, in_column=id_col_index)
+        row_index = cell.row
+
+        # Récupérer toutes les valeurs de l'en-tête pour s'assurer d'avoir le bon ordre
+        headers = worksheet.row_values(1)
+        
+        # Récupérer les valeurs actuelles de la ligne pour ne modifier que les champs concernés
+        current_row_values = worksheet.row_values(row_index)
+        updated_values = current_row_values[:] # Copie pour modification
+        
+        for col_name, new_value in row_data.items():
+            if col_name in headers:
+                col_index = headers.index(col_name)
+                updated_values[col_index] = new_value
+            else:
+                st.warning(f"La colonne '{col_name}' n'existe pas dans l'onglet '{sheet_name}'. Ignoré lors de la mise à jour.")
+
+        # Mettre à jour toute la ligne
+        worksheet.update(f'A{row_index}', [updated_values])
+        st.cache_data.clear() # Invalider le cache après une écriture
+        return True
+    except gspread.exceptions.CellNotFound:
+        st.error(f"L'identifiant '{unique_id_value}' n'a pas été trouvé dans la colonne '{unique_id_col}' de l'onglet '{sheet_name}'.")
         return False
     except Exception as e:
-        st.error(f"Erreur lors de la suppression de l'entrée dans l'onglet '{worksheet_name}' : {e}")
+        st.error(f"Erreur lors de la mise à jour de la ligne dans l'onglet '{sheet_name}': {e}")
         return False
 
+def delete_row_from_sheet(sheet_name: str, unique_id_col: str, unique_id_value: str) -> bool:
+    """
+    Supprime une ligne de l'onglet spécifié, identifiée par une colonne et une valeur unique.
+    """
+    try:
+        spreadsheet = gc.open(SHEET_NAME)
+        worksheet = spreadsheet.worksheet(WORKSHEET_NAMES[sheet_name])
+        
+        id_col_index = worksheet.find(unique_id_col).col
+        cell = worksheet.find(unique_id_value, in_column=id_col_index)
+        worksheet.delete_rows(cell.row)
+        st.cache_data.clear() # Invalider le cache après une suppression
+        return True
+    except gspread.exceptions.CellNotFound:
+        st.error(f"L'identifiant '{unique_id_value}' n'a pas été trouvé dans la colonne '{unique_id_col}' de l'onglet '{sheet_name}'.")
+        return False
+    except Exception as e:
+        st.error(f"Erreur lors de la suppression de la ligne dans l'onglet '{sheet_name}': {e}")
+        return False
 
-# Initialise la connexion aux sheets au démarrage du module
-gc, spreadsheet, worksheet_oeuvres = get_gspread_client_and_worksheets()
+# --- Fonctions spécifiques pour chaque onglet (simplifiées ici pour les ajouts) ---
+
+def add_morceau_generes(data: dict) -> bool:
+    data['ID_Morceau'] = generate_unique_id('M')
+    data['Date_Creation'] = datetime.now().strftime('%Y-%m-%d')
+    data['Date_Mise_A_Jour'] = datetime.now().strftime('%Y-%m-%d')
+    return append_row_to_sheet("MORCEAUX_GENERES", data)
+
+def update_morceau_generes(morceau_id: str, data: dict) -> bool:
+    data['Date_Mise_A_Jour'] = datetime.now().strftime('%Y-%m-%d')
+    return update_row_in_sheet("MORCEAUX_GENERES", 'ID_Morceau', morceau_id, data)
+
+def add_historique_generation(data: dict) -> bool:
+    data['ID_GenLog'] = generate_unique_id('LOG')
+    data['Date_Heure'] = datetime.now().strftime('%Y-%m-%d %H:%M:%S')
+    # Assurez-vous que 'user_id' est initialisé dans st.session_state si utilisé
+    data['ID_Utilisateur'] = st.session_state.get('user_id', 'Gardien')
+    return append_row_to_sheet("HISTORIQUE_GENERATIONS", data)
+
+# Ajout de fonctions pour les nouveaux onglets si nécessaire (par exemple, pour les onglets des bibliothèques)
+# Ces fonctions sont des wrappers pour append_row_to_sheet et update_row_in_sheet,
+# pour ajouter des ID uniques ou des dates si nécessaire, avant l'appel générique.
+
+def add_album(data: dict) -> bool:
+    data['ID_Album'] = generate_unique_id('A')
+    # Ajouter Date_Sortie_Prevue si non présente, ou s'assurer du format
+    if 'Date_Sortie_Prevue' not in data or not data['Date_Sortie_Prevue']:
+        data['Date_Sortie_Prevue'] = datetime.now().strftime('%Y-%m-%d')
+    return append_row_to_sheet("ALBUMS_PLANETAIRES", data)
+
+def update_album(album_id: str, data: dict) -> bool:
+    return update_row_in_sheet("ALBUMS_PLANETAIRES", 'ID_Album', album_id, data)
+
+def add_artiste_ia(data: dict) -> bool:
+    data['ID_Artiste_IA'] = generate_unique_id('AI')
+    return append_row_to_sheet("ARTISTES_IA_COSMIQUES", data)
+
+def update_artiste_ia(artiste_id: str, data: dict) -> bool:
+    return update_row_in_sheet("ARTISTES_IA_COSMIQUES", 'ID_Artiste_IA', artiste_id, data)
+
+def add_paroles_existantes(data: dict) -> bool:
+    if 'ID_Morceau' not in data or not data['ID_Morceau']:
+        data['ID_Morceau'] = generate_unique_id('M') # Génère si non fourni
+    return append_row_to_sheet("PAROLES_EXISTANTES", data)
+
+def update_paroles_existantes(morceau_id: str, data: dict) -> bool:
+    return update_row_in_sheet("PAROLES_EXISTANTES", 'ID_Morceau', morceau_id, data)
+
+def add_style_musical(data: dict) -> bool:
+    data['ID_Style_Musical'] = generate_unique_id('SM')
+    return append_row_to_sheet("STYLES_MUSICAUX_GALACTIQUES", data)
+
+def update_style_musical(style_id: str, data: dict) -> bool:
+    return update_row_in_sheet("STYLES_MUSICAUX_GALACTIQUES", 'ID_Style_Musical', style_id, data)
+
+def add_style_lyrique(data: dict) -> bool:
+    data['ID_Style_Lyrique'] = generate_unique_id('SL')
+    return append_row_to_sheet("STYLES_LYRIQUES_UNIVERS", data)
+
+def update_style_lyrique(style_id: str, data: dict) -> bool:
+    return update_row_in_sheet("STYLES_LYRIQUES_UNIVERS", 'ID_Style_Lyrique', style_id, data)
+
+def add_theme(data: dict) -> bool:
+    data['ID_Theme'] = generate_unique_id('TH')
+    return append_row_to_sheet("THEMES_CONSTELLES", data)
+
+def update_theme(theme_id: str, data: dict) -> bool:
+    return update_row_in_sheet("THEMES_CONSTELLES", 'ID_Theme', theme_id, data)
+
+def add_mood(data: dict) -> bool:
+    data['ID_Mood'] = generate_unique_id('MOOD')
+    return append_row_to_sheet("MOODS_ET_EMOTIONS", data)
+
+def update_mood(mood_id: str, data: dict) -> bool:
+    return update_row_in_sheet("MOODS_ET_EMOTIONS", 'ID_Mood', mood_id, data)
+
+def add_instrument(data: dict) -> bool:
+    data['ID_Instrument'] = generate_unique_id('INST')
+    return append_row_to_sheet("INSTRUMENTS_ORCHESTRAUX", data)
+
+def update_instrument(instrument_id: str, data: dict) -> bool:
+    return update_row_in_sheet("INSTRUMENTS_ORCHESTRAUX", 'ID_Instrument', instrument_id, data)
+
+def add_voix_style(data: dict) -> bool:
+    data['ID_Vocal'] = generate_unique_id('VOC')
+    return append_row_to_sheet("VOIX_ET_STYLES_VOCAUX", data)
+
+def update_voix_style(vocal_id: str, data: dict) -> bool:
+    return update_row_in_sheet("VOIX_ET_STYLES_VOCAUX", 'ID_Vocal', vocal_id, data)
+
+def add_structure_song(data: dict) -> bool:
+    data['ID_Structure'] = generate_unique_id('STR')
+    return append_row_to_sheet("STRUCTURES_SONG_UNIVERSELLES", data)
+
+def update_structure_song(structure_id: str, data: dict) -> bool:
+    return update_row_in_sheet("STRUCTURES_SONG_UNIVERSELLES", 'ID_Structure', structure_id, data)
+
+def add_regle_generation(data: dict) -> bool:
+    data['ID_Regle'] = generate_unique_id('REGLE')
+    return append_row_to_sheet("REGLES_DE_GENERATION_ORACLE", data)
+
+def update_regle_generation(regle_id: str, data: dict) -> bool:
+    return update_row_in_sheet("REGLES_DE_GENERATION_ORACLE", 'ID_Regle', regle_id, data)
+
+def add_projet_en_cours(data: dict) -> bool:
+    data['ID_Projet'] = generate_unique_id('PROJ')
+    # Les dates sont gérées par app.py avant d'appeler cette fonction
+    return append_row_to_sheet("PROJETS_EN_COURS", data)
+
+def update_projet_en_cours(projet_id: str, data: dict) -> bool:
+    return update_row_in_sheet("PROJETS_EN_COURS", 'ID_Projet', projet_id, data)
+
+def add_outil_ia(data: dict) -> bool:
+    data['ID_Outil'] = generate_unique_id('IA')
+    return append_row_to_sheet("OUTILS_IA_REFERENCEMENT", data)
+
+def update_outil_ia(outil_id: str, data: dict) -> bool:
+    return update_row_in_sheet("OUTILS_IA_REFERENCEMENT", 'ID_Outil', outil_id, data)
+
+def add_timeline_event(data: dict) -> bool:
+    data['ID_Evenement'] = generate_unique_id('EV')
+    # Les dates sont gérées par app.py avant d'appeler cette fonction
+    return append_row_to_sheet("TIMELINE_EVENEMENTS_CULTURELS", data)
+
+def update_timeline_event(event_id: str, data: dict) -> bool:
+    return update_row_in_sheet("TIMELINE_EVENEMENTS_CULTURELS", 'ID_Evenement', event_id, data)
+
+# Fonctions génériques pour obtenir toutes les données d'un onglet
+def get_all_morceaux():
+    return get_dataframe_from_sheet("MORCEAUX_GENERES")
+
+def get_all_albums():
+    return get_dataframe_from_sheet("ALBUMS_PLANETAIRES")
+
+def get_all_sessions_creatives():
+    return get_dataframe_from_sheet("SESSIONS_CREATIVES_ORACLE")
+
+def get_all_artistes_ia():
+    return get_dataframe_from_sheet("ARTISTES_IA_COSMIQUES")
+
+def get_all_styles_musicaux():
+    return get_dataframe_from_sheet("STYLES_MUSICAUX_GALACTIQUES")
+
+def get_all_styles_lyriques():
+    return get_dataframe_from_sheet("STYLES_LYRIQUES_UNIVERS")
+
+def get_all_themes():
+    return get_dataframe_from_sheet("THEMES_CONSTELLES")
+
+def get_all_stats_simulees():
+    return get_dataframe_from_sheet("STATISTIQUES_ORBITALES_SIMULEES")
+
+def get_all_conseils_strategiques():
+    return get_dataframe_from_sheet("CONSEILS_STRATEGIQUES_ORACLE")
+
+def get_all_instruments():
+    return get_dataframe_from_sheet("INSTRUMENTS_ORCHESTRAUX")
+
+def get_all_structures_song():
+    return get_dataframe_from_sheet("STRUCTURES_SONG_UNIVERSELLES")
+
+def get_all_voix_styles():
+    return get_dataframe_from_sheet("VOIX_ET_STYLES_VOCAUX")
+
+def get_all_regles_generation():
+    return get_dataframe_from_sheet("REGLES_DE_GENERATION_ORACLE")
+
+def get_all_moods():
+    return get_dataframe_from_sheet("MOODS_ET_EMOTIONS")
+
+def get_all_references_sonores():
+    return get_dataframe_from_sheet("REFERENCES_SONORES_DETAILLES")
+
+def get_all_public_cible():
+    return get_dataframe_from_sheet("PUBLIC_CIBLE_DEMOGRAPHIQUE")
+
+def get_all_prompts_types():
+    return get_dataframe_from_sheet("PROMPTS_TYPES_ET_GUIDES")
+
+def get_all_projets_en_cours():
+    return get_dataframe_from_sheet("PROJETS_EN_COURS")
+
+def get_all_outils_ia():
+    return get_dataframe_from_sheet("OUTILS_IA_REFERENCEMENT")
+
+def get_all_timeline_evenements():
+    return get_dataframe_from_sheet("TIMELINE_EVENEMENTS_CULTURELS")
+
+def get_all_paroles_existantes():
+    return get_dataframe_from_sheet("PAROLES_EXISTANTES")
+
+def get_all_historique_generations():
+    return get_dataframe_from_sheet("HISTORIQUE_GENERATIONS")

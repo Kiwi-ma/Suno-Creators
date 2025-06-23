@@ -13,9 +13,9 @@ from datetime import datetime
 try:
     genai.configure(api_key=st.secrets[GEMINI_API_KEY_NAME])
     # Initialisation du modèle GenerativeModel pour le texte
-    _text_model = genai.GenerativeModel('gemini-1.5-flash')
+    _text_model = genai.GenerativeModel('gemini-2.5-flash')
     # Pour les tâches plus créatives ou complexes
-    _creative_model = genai.GenerativeModel('gemini-1.5-pro')
+    _creative_model = genai.GenerativeModel('gemini-2.5-pro')
     st.session_state['gemini_initialized'] = True
 except Exception as e:
     st.error(f"Erreur d'initialisation de l'API Gemini. Assurez-vous que votre clé API est correcte dans .streamlit/secrets.toml : {e}")

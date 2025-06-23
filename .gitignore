@@ -1,0 +1,23 @@
+# Fichiers de configuration Streamlit sensibles
+.streamlit/secrets.toml
+
+# Fichiers d'authentification Google Sheets
+credentials.json
+token.json
+
+# Dossiers de cache Python
+__pycache__/
+
+# Environnement virtuel Python
+venv/
+*.venv/
+
+# Fichiers de données générés localement
+assets/texts/
+assets/covers/
+# assets/audio/
+
+# Logs et autres fichiers temporaires
+*.log
+.DS_Store
+Thumbs.db

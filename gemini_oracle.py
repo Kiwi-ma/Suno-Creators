@@ -32,7 +32,7 @@ else:
 
 # --- Fonctions d'Interaction avec l'Oracle Gemini ---
 
-def _generate_content(model, prompt: str, type_generation: str = "Contenu Général", associated_id: str = "", temperature: float = 0.7, max_output_tokens: int = 1024) -> str:
+def _generate_content(model, prompt: str, type_generation: str = "Contenu Général", associated_id: str = "", temperature: float = 0.1, max_output_tokens: int = 1024) -> str:
     """
     Fonction interne pour générer du contenu avec Gemini et logger l'interaction.
     """

@@ -2,72 +2,137 @@
 
 import streamlit as st
 import google.generativeai as genai
-from config import GEMINI_API_KEY_NAME, WORKSHEET_NAMES
-from sheets_connector import get_dataframe_from_sheet, add_historique_generation, append_row_to_sheet # Ajout de append_row_to_sheet
-from utils import safe_cast_to_float, safe_cast_to_int
 import pandas as pd
 import random
 from datetime import datetime
+import base64
+import json
 
-# --- Configuration de l'API Gemini ---
-# Récupère la clé API directement de Streamlit Cloud
+# Importation des configurations et du connecteur Sheets
+# Assurez-vous que ces fichiers sont présents et à jour dans votre répertoire
+from config import GEMINI_API_KEY_NAME, WORKSHEET_NAMES
+# Nous importons les fonctions spécifiques du connecteur Sheets plutôt que le module entier
+# pour éviter les dépendances circulaires ou des problèmes d'initialisation précoce de gspread
+# si sheets_connector.py tente de charger des données AVANT que gemini_oracle.py soit stable.
+from sheets_connector import append_row_to_sheet, get_dataframe_from_sheet # Note: get_dataframe_from_sheet est importé ici pour les fonctions locales qui en ont besoin
+
+# --- Initialisation de la Connexion à l'API Gemini ---
+# Ce bloc est conçu pour être résilient face aux problèmes de clé API et de service
 gemini_api_key = st.secrets.get(GEMINI_API_KEY_NAME)
 
 if gemini_api_key:
     try:
         genai.configure(api_key=gemini_api_key)
+        # Modèles principaux utilisés
+        # Nous utilisons gemini-1.5-flash pour TOUTES les requêtes afin de minimiser les problèmes de quota
         _text_model = genai.GenerativeModel('gemini-2.5-flash')
-        _creative_model = genai.GenerativeModel('gemini-2.5-flash')
+        _creative_model = genai.GenerativeModel('gemini-2.5-flash') # Unifié sur flash pour la robustesse des quotas
         st.session_state['gemini_initialized'] = True
+        st.session_state['gemini_error'] = None # Réinitialiser l'erreur si l'initialisation réussit
     except Exception as e:
-        st.error(f"Erreur d'initialisation de l'API Gemini. Vérifiez votre clé : {e}")
         st.session_state['gemini_initialized'] = False
+        st.session_state['gemini_error'] = f"Échec d'initialisation Gemini : {e}. Vérifiez votre clé API dans les secrets Streamlit Cloud."
         _text_model = None
-        _creative_model = None
+        _creative_model = None # Fallback pour éviter les erreurs d'objets None
 else:
-    st.error(f"La clé API Gemini '{GEMINI_API_KEY_NAME}' est manquante dans les secrets de votre application Streamlit Cloud. Veuillez la configurer pour utiliser l'Oracle.")
     st.session_state['gemini_initialized'] = False
+    st.session_state['gemini_error'] = f"La clé API Gemini '{GEMINI_API_KEY_NAME}' est manquante dans les secrets de votre application Streamlit Cloud. Veuillez la configurer."
     _text_model = None
     _creative_model = None
 
-# --- Fonctions d'Interaction avec l'Oracle Gemini ---
+# --- Fonctions Utilitaires Internes pour l'Oracle ---
+
+def _log_gemini_interaction(type_generation: str, prompt_sent: str, response_received: str, associated_id: str = "", evaluation: str = "", comment: str = "", tags: str = "", regle_auto: str = ""):
+    """
+    Fonction interne pour logger chaque interaction avec Gemini dans l'historique.
+    Utilise append_row_to_sheet via le wrapper add_historique_generation pour éviter une dépendance directe et garantir la bonne initialisation de sheets_connector.
+    """
+    log_data = {
+        'Type_Generation': type_generation,
+        'Prompt_Envoye_Full': prompt_sent,
+        'Reponse_Recue_Full': response_received,
+        'ID_Morceau_Associe': associated_id,
+        'Evaluation_Manuelle': evaluation,
+        'Commentaire_Qualitatif': comment,
+        'Tags_Feedback': tags,
+        'ID_Regle_Appliquee_Auto': regle_auto
+    }
+    # Appel de la fonction de sheets_connector pour ajouter l'historique
+    # Note: add_historique_generation est un wrapper qui gère l'ID et la date/heure
+    try:
+        from sheets_connector import add_historique_generation # Importation locale pour éviter les dépendances circulaires lors de l'initialisation du module
+        add_historique_generation(log_data)
+    except Exception as e:
+        st.error(f"Erreur critique lors de l'enregistrement de l'historique Gemini: {e}")
+        st.warning("L'historique de l'Oracle pourrait ne pas être complet. Vérifiez votre `sheets_connector.py`.")
+
 
 def _generate_content(model, prompt: str, type_generation: str = "Contenu Général", associated_id: str = "", temperature: float = 0.1, max_output_tokens: int = 1024) -> str:
     """
-    Fonction interne pour générer du contenu avec Gemini et logger l'interaction.
+    Fonction interne robuste pour générer du contenu avec Gemini et logger l'interaction.
+    Anticipe les blocages de sécurité et les échecs de génération.
     """
     if not st.session_state.get('gemini_initialized', False) or model is None:
-        return "L'API Gemini n'est pas initialisée. Veuillez vérifier votre clé API et les logs d'erreur."
-   
+        return st.session_state.get('gemini_error', "L'Oracle est indisponible. Vérifiez la configuration de l'API Gemini.")
+    
+    # Instructions de sécurité explicites injectées dans CHAQUE prompt.
+    # Ceci est une mesure proactive pour guider l'IA loin des contenus bloqués.
+    safety_instructions = """
+    Votre réponse doit être absolument sûre, appropriée, respectueuse, et ne doit jamais inclure de contenu violent, haineux, sexuellement explicite, illégal, ou dangereux, même implicitement. Évitez tout sujet controversé, discriminatoire ou incitant à la violence. Si vous ne pouvez pas générer un contenu conforme à ces règles pour la requête donnée, veuillez répondre par un message clair indiquant que la génération est impossible pour des raisons de conformité, sans donner de détails sur le motif précis du blocage. Votre objectif est d'être utile et inoffensif.
+    """
+    
+    final_prompt = safety_instructions + "\n\n" + prompt # Injecte les instructions au début
+    
     try:
         response = model.generate_content(
-            prompt,
+            final_prompt, # Envoie le prompt modifié avec les instructions de sécurité
             generation_config=genai.types.GenerationConfig(
                 candidate_count=1,
                 temperature=temperature,
                 max_output_tokens=max_output_tokens
-            )
+            ),
+            # Les safety_settings sont configurés pour être très stricts au niveau de l'API
+            # Les laisser par défaut (BLOCK_UNSPECIFIED) est souvent le plus sûr si l'injection de prompt ne suffit pas,
+            # car Google peut surcharger nos paramètres si le contenu est jugé trop risqué.
+            # Pour le moment, nous les commentons, nous nous appuyons sur le prompt pour l'auto-censure de l'IA.
+            # Si le problème persiste, on pourrait tenter de les ajuster, mais cela risquerait de rendre les filtres plus permissifs
+            # alors que le problème est souvent lié à la *sortie* bloquée par Google même si le prompt est neutre.
+            # safety_settings=[
+            #     {"category": "HARM_CATEGORY_HARASSMENT", "threshold": "BLOCK_NONE"},
+            #     {"category": "HARM_CATEGORY_HATE_SPEECH", "threshold": "BLOCK_NONE"},
+            #     {"category": "HARM_CATEGORY_SEXUALLY_EXPLICIT", "threshold": "BLOCK_NONE"},
+            #     {"category": "HARM_CATEGORY_DANGEROUS_CONTENT", "threshold": "BLOCK_NONE"},
+            # ]
         )
+        
+        # Gestion des réponses vides ou bloquées par l'API
+        if not response.candidates:
+            block_reason_detail = "Raison inconnue."
+            if response.prompt_feedback and response.prompt_feedback.block_reason:
+                block_reason_detail = response.prompt_feedback.block_reason.name
+            
+            error_message = f"La génération a été bloquée par les filtres de sécurité de l'Oracle. Raison : {block_reason_detail}. Veuillez ajuster votre prompt pour qu'il soit plus conforme et moins ambigu."
+            st.error(error_message)
+            _log_gemini_interaction(type_generation, final_prompt, f"BLOCKED: {block_reason_detail}", associated_id)
+            return "Désolé, la génération de contenu a été bloquée pour des raisons de conformité. Essayez une requête plus simple ou différente."
+        
         generated_text = response.text
-       
-        # Log l'interaction dans l'historique
-        log_data = {
-            'Type_Generation': type_generation,
-            'Prompt_Envoye_Full': prompt,
-            'Reponse_Recue_Full': generated_text,
-            'ID_Morceau_Associe': associated_id,
-            'Evaluation_Manuelle': '',
-            'Commentaire_Qualitatif': '',
-            'Tags_Feedback': '',
-            'ID_Regle_Appliquee_Auto': ''
-        }
-        # Utilisation de append_row_to_sheet de sheets_connector pour l'historique
-        add_historique_generation(log_data)
-       
+        
+        _log_gemini_interaction(type_generation, final_prompt, generated_text, associated_id)
+        
         return generated_text
+    except genai.types.BlockedPromptException as e:
+        st.error(f"Votre prompt a été bloqué par les filtres de sécurité de l'API Gemini. Raisons : {e.response.prompt_feedback.block_reason_messages}. Veuillez reformuler.")
+        _log_gemini_interaction(type_generation, final_prompt, f"PROMPT BLOQUÉ: {e.response.prompt_feedback.block_reason_messages}", associated_id)
+        return "Votre requête a été bloquée pour des raisons de sécurité. Veuillez essayer un prompt différent."
+    except genai.types.StopCandidateException as e:
+        st.warning(f"La génération s'est arrêtée prématurément. Raison: {e.response.candidates[0].finish_reason}. Le contenu pourrait être incomplet.")
+        _log_gemini_interaction(type_generation, final_prompt, f"Génération Incomplète: {e.response.candidates[0].finish_reason}", associated_id)
+        return e.response.text if e.response.text else "La génération est incomplète. Veuillez réessayer ou simplifier la demande."
     except Exception as e:
-        st.error(f"Erreur lors de la génération de contenu avec Gemini: {e}")
-        return f"Désolé, une erreur est survenue lors de la génération: {e}"
+        st.error(f"Une erreur inattendue est survenue lors de la communication avec l'API Gemini: {e}. Vérifiez votre connexion internet ou la configuration de votre clé API.")
+        _log_gemini_interaction(type_generation, final_prompt, f"ERREUR API: {e}", associated_id)
+        return f"Désolé, une erreur de communication est survenue: {e}"
 
 # --- Fonctions de Génération de Contenu Spécifiques ---
 
@@ -77,31 +142,33 @@ def generate_song_lyrics(
     langue_paroles: str, niveau_langage_paroles: str, imagerie_texte: str
 ) -> str:
     """Génère des paroles de chanson complètes."""
-   
+    
+    # Anticiper les DF vides
     styles_lyriques_df = get_dataframe_from_sheet(WORKSHEET_NAMES["STYLES_LYRIQUES_UNIVERS"])
     themes_df = get_dataframe_from_sheet(WORKSHEET_NAMES["THEMES_CONSTELLES"])
     moods_df = get_dataframe_from_sheet(WORKSHEET_NAMES["MOODS_ET_EMOTIONS"])
     structures_df = get_dataframe_from_sheet(WORKSHEET_NAMES["STRUCTURES_SONG_UNIVERSELLES"])
 
-    # Récupérer les descriptions détaillées pour un meilleur prompt
-    style_lyrique_desc = styles_lyriques_df[styles_lyriques_df['ID_Style_Lyrique'] == style_lyrique]['Description_Detaillee'].iloc[0] if not styles_lyriques_df[styles_lyriques_df['ID_Style_Lyrique'] == style_lyrique].empty else style_lyrique
-    theme_desc = themes_df[themes_df['ID_Theme'] == theme_lyrique_principal]['Description_Conceptuelle'].iloc[0] if not themes_df[themes_df['ID_Theme'] == theme_lyrique_principal].empty else theme_lyrique_principal
-    mood_desc = moods_df[moods_df['ID_Mood'] == mood_principal]['Description_Nuance'].iloc[0] if not moods_df[moods_df['ID_Mood'] == mood_principal].empty else mood_principal
-    structure_schema = structures_df[structures_df['ID_Structure'] == structure_chanSONG]['Schema_Detaille'].iloc[0] if not structures_df[structures_df['ID_Structure'] == structure_chanSONG].empty else structure_chanSONG
-   
-    prompt = f"""Agis comme un parolier expert, poétique et sensible.
-    Génère des paroles complètes pour une chanson dans le genre **{genre_musical}**.
+    # Récupérer les descriptions détaillées pour un meilleur prompt, avec gestion des valeurs manquantes
+    style_lyrique_desc = styles_lyriques_df[styles_lyriques_df['ID_Style_Lyrique'] == style_lyrique]['Description_Detaillee'].iloc[0] if style_lyrique and not styles_lyriques_df.empty and style_lyrique in styles_lyriques_df['ID_Style_Lyrique'].values else style_lyrique
+    theme_desc = themes_df[themes_df['ID_Theme'] == theme_lyrique_principal]['Description_Conceptuelle'].iloc[0] if theme_lyrique_principal and not themes_df.empty and theme_lyrique_principal in themes_df['ID_Theme'].values else theme_lyrique_principal
+    mood_desc = moods_df[moods_df['ID_Mood'] == mood_principal]['Description_Nuance'].iloc[0] if mood_principal and not moods_df.empty and mood_principal in moods_df['ID_Mood'].values else mood_principal
+    structure_schema = structures_df[structures_df['ID_Structure'] == structure_chanSONG]['Schema_Detaille'].iloc[0] if structure_chanSONG and not structures_df.empty and structure_chanSONG in structures_df['ID_Structure'].values else structure_chanSONG
+    
+    prompt = f"""En tant que parolier expert, poétique et sensible, crée des paroles complètes et originales.
+    Génère des paroles pour une chanson dans le genre **{genre_musical}**.
     Le mood principal est **{mood_principal} ({mood_desc})**.
     Le thème principal est **{theme_lyrique_principal} ({theme_desc})**.
     Utilise un style lyrique **{style_lyrique} ({style_lyrique_desc})**.
-    Inclus les mots-clés ou concepts suivants: **{mots_cles_generation}**.
-    La structure de la chanson doit être: **{structure_chanSONG} ({structure_schema})**.
+    Inclus les mots-clés ou concepts suivants (si fournis, sinon ignore) : **{mots_cles_generation}**.
+    La structure de la chanson doit être : **{structure_chanSONG} ({structure_schema})**.
     La langue des paroles est **{langue_paroles}**, avec un niveau de langage **{niveau_langage_paroles}**.
     L'imagerie textuelle doit être **{imagerie_texte}**.
 
-    Respecte scrupuleusement la structure demandée (Intro, Couplet, Refrain, Pont, Outro etc. si applicable). Chaque section doit être clairement identifiée.
+    Respecte scrupuleusement la structure demandée (Intro, Couplet, Refrain, Pont, Outro etc. si applicable). Chaque section doit être clairement identifiée (par exemple, "COUPLET 1:", "REFRAIN:", "PONT:").
+    N'incluez pas de notes explicatives sur la structure dans la réponse finale, seulement les paroles.
     """
-    return _generate_content(_creative_model, prompt, type_generation="Paroles de Chanson", temperature=0.9, max_output_tokens=2000)
+    return _generate_content(_creative_model, prompt, type_generation="Paroles de Chanson", temperature=0.7, max_output_tokens=2000) # Température ajustée pour la créativité
 
 def generate_audio_prompt(
     genre_musical: str, mood_principal: str, duree_estimee: str,
@@ -111,27 +178,28 @@ def generate_audio_prompt(
     structure_song: str = "N/A"
 ) -> str:
     """Génère un prompt textuel détaillé pour la génération audio (optimisé pour SUNO)."""
-   
+    
     moods_df = get_dataframe_from_sheet(WORKSHEET_NAMES["MOODS_ET_EMOTIONS"])
-    mood_desc = moods_df[moods_df['ID_Mood'] == mood_principal]['Description_Nuance'].iloc[0] if not moods_df[moods_df['ID_Mood'] == mood_principal].empty else mood_principal
+    mood_desc = moods_df[moods_df['ID_Mood'] == mood_principal]['Description_Nuance'].iloc[0] if mood_principal and not moods_df.empty and mood_principal in moods_df['ID_Mood'].values else mood_principal
 
     vocal_details = ""
-    if type_voix_desiree != "N/A":
-        vocal_details = f"Avec une voix {type_voix_desiree} de style {style_vocal_desire} et de caractère {caractere_voix_desire}. "
+    if type_voix_desiree and type_voix_desiree != "N/A":
+        vocal_details = f"Avec une voix {type_voix_desiree} de style {style_vocal_desire if style_vocal_desire else 'neutre'} et de caractère {caractere_voix_desire if caractere_voix_desire else 'approprié'}. "
 
-    prompt = f"""Crée un prompt détaillé pour un générateur audio comme SUNO. La musique doit être de genre **{genre_musical}**.
+    prompt = f"""Crée un prompt détaillé, précis et concis pour un générateur audio comme SUNO.
+    La musique doit être de genre **{genre_musical}**.
     Le mood est **{mood_principal} ({mood_desc})**.
     La durée visée est d'environ **{duree_estimee}**.
-    L'instrumentation principale doit inclure : **{instrumentation_principale}**.
-    L'ambiance sonore spécifique doit être : **{ambiance_sonore_specifique}**.
-    Les effets de production dominants sont : **{effets_production_dominants}**.
+    L'instrumentation principale doit inclure : **{instrumentation_principale if instrumentation_principale else 'instruments standards pour ce genre'}**.
+    L'ambiance sonore spécifique doit être : **{ambiance_sonore_specifique if ambiance_sonore_specifique else 'cohérente avec le mood'}**.
+    Les effets de production dominants sont : **{effets_production_dominants if effets_production_dominants else 'standard pour ce genre'}**.
     {vocal_details}
-    La structure du morceau est : **{structure_song}**.
+    La structure du morceau est : **{structure_song if structure_song and structure_song != 'N/A' else 'typique du genre'}**.
 
-    Le prompt doit être concis, descriptif, et utiliser des termes musicaux évocateurs.
-    Exemple de format : [Genre] | [Mood] | [Instrumentation] | [Ambiance] | [Effets] | [Détails vocaux] | [Structure]
+    Format de sortie strict pour SUNO :
+    [Genre] | [Mood] | [Instrumentation] | [Ambiance] | [Effets] | [Détails vocaux, si applicable] | [Structure]
     """
-    return _generate_content(_text_model, prompt, type_generation="Prompt Audio", temperature=0.8, max_output_tokens=500)
+    return _generate_content(_text_model, prompt, type_generation="Prompt Audio", temperature=0.6, max_output_tokens=500) # Température ajustée
 
 def generate_title_ideas(theme_principal: str, genre_musical: str, paroles_extrait: str = "") -> str:
     """Propose plusieurs idées de titres de chansons."""
@@ -139,40 +207,41 @@ def generate_title_ideas(theme_principal: str, genre_musical: str, paroles_extra
     Le thème principal est **{theme_principal}**.
     Le genre musical est **{genre_musical}**.
     Si des paroles sont fournies, inspire-toi-en : "{paroles_extrait}"
-    Présente les titres sous forme de liste numérotée."""
+    Présente les titres sous forme de liste numérotée, sans aucun texte introductif ni explicatif.
+    """
     return _generate_content(_text_model, prompt, type_generation="Idées de Titres", temperature=0.7)
 
 def generate_marketing_copy(titre_morceau: str, genre_musical: str, mood_principal: str, public_cible: str, point_fort_principal: str) -> str:
     """Génère un texte de description marketing court."""
     public_cible_df = get_dataframe_from_sheet(WORKSHEET_NAMES["PUBLIC_CIBLE_DEMOGRAPHIQUE"])
-    public_desc = public_cible_df[public_cible_df['ID_Public'] == public_cible]['Notes_Comportement'].iloc[0] if not public_cible_df[public_cible_df['ID_Public'] == public_cible].empty else public_cible
+    public_desc = public_cible_df[public_cible_df['ID_Public'] == public_cible]['Notes_Comportement'].iloc[0] if public_cible and not public_cible_df.empty and public_cible in public_cible_df['ID_Public'].values else public_cible
 
-    prompt = f"""Rédige une description marketing courte (maximum 60 mots) pour le morceau '{titre_morceau}'.
+    prompt = f"""Rédige une description marketing courte (maximum 60 mots) et percutante pour le morceau ou l'album '{titre_morceau}'.
     Genre: {genre_musical}. Mood: {mood_principal}.
     Cible le public: {public_cible} ({public_desc}).
     Mets en avant le point fort principal: {point_fort_principal}.
-    Ajoute un appel à l'action et 3-5 hashtags pertinents. Sois engageant."""
+    Ajoute un appel à l'action clair et 3-5 hashtags pertinents à la fin. Sois engageant et persuasif."""
     return _generate_content(_text_model, prompt, type_generation="Description Marketing", temperature=0.7, max_output_tokens=200)
 
 def generate_album_art_prompt(nom_album: str, genre_dominant_album: str, description_concept_album: str, mood_principal: str, mots_cles_visuels_suppl: str) -> str:
     """Crée un prompt détaillé pour une IA génératrice d'images (Midjourney/DALL-E)."""
     moods_df = get_dataframe_from_sheet(WORKSHEET_NAMES["MOODS_ET_EMOTIONS"])
-    mood_desc = moods_df[moods_df['ID_Mood'] == mood_principal]['Description_Nuance'].iloc[0] if not moods_df[moods_df['ID_Mood'] == mood_principal].empty else mood_principal
+    mood_desc = moods_df[moods_df['ID_Mood'] == mood_principal]['Description_Nuance'].iloc[0] if mood_principal and not moods_df.empty and mood_principal in moods_df['ID_Mood'].values else mood_principal
 
     prompt = f"""Crée un prompt visuel détaillé et évocateur pour une IA génératrice d'images (comme Midjourney ou DALL-E) pour la pochette de l'album '{nom_album}'.
     Le genre dominant est **{genre_dominant_album}**.
     Le concept de l'album est : **{description_concept_album}**.
     Le mood visuel doit être : **{mood_principal} ({mood_desc})**.
-    Inclus les mots-clés visuels supplémentaires : **{mots_cles_visuels_suppl}**.
-    Précise le style artistique souhaité (ex: photographie, peinture numérique, illustration 3D, pixel art, style expressionniste, etc.), la palette de couleurs, la composition et l'éclairage.
+    Inclus les mots-clés visuels supplémentaires (si fournis, sinon ignore) : **{mots_cles_visuels_suppl}**.
+    Précise le style artistique souhaité (ex: photographie surréaliste, peinture numérique abstraite, illustration cyberpunk 3D, pixel art nostalgique, style expressionniste sombre), la palette de couleurs dominante, la composition (gros plan, plan large), et l'éclairage. Inclue des ratios d'image si pertinents (ex: --ar 1:1 pour Midjourney).
     """
-    return _generate_content(_creative_model, prompt, type_generation="Prompt Pochette Album", temperature=0.9, max_output_tokens=1000)
+    return _generate_content(_creative_model, prompt, type_generation="Prompt Pochette Album", temperature=0.8, max_output_tokens=1000)
 
 def simulate_streaming_stats(morceau_ids: list, num_months: int) -> pd.DataFrame:
     """Simule des statistiques d'écoute pour un ou plusieurs morceaux et les ajoute à la feuille de calcul."""
-   
+    
     morceaux_df = get_dataframe_from_sheet(WORKSHEET_NAMES["MORCEAUX_GENERES"])
-   
+    
     sim_data = []
     current_date = datetime.now()
 
@@ -182,21 +251,19 @@ def simulate_streaming_stats(morceau_ids: list, num_months: int) -> pd.DataFrame
             st.warning(f"Morceau avec ID {morceau_id} introuvable pour la simulation. Ignoré.")
             continue
 
-        titre_morceau = morceau['Titre_Morceau'].iloc[0]
-        genre_musical = morceau['ID_Style_Musical_Principal'].iloc[0]
-       
+        # Assurer que les types de données sont corrects pour les opérations (robustesse)
+        genre_musical = morceau['ID_Style_Musical_Principal'].iloc[0] if 'ID_Style_Musical_Principal' in morceau.columns else 'Non Spécifié'
+        
         # Pour une base d'écoutes plus réaliste, on pourrait la lier au "succès" passé ou à des valeurs initiales par défaut
         # Pour l'exemple, utilisons une base aléatoire pour la première simulation du morceau.
-        # Si le morceau a déjà des stats, on pourrait les récupérer et continuer la simulation.
-        base_ecoutes_initial = random.randint(1000, 10000) # Base de départ aléatoire pour le premier mois
+        base_ecoutes_initial = random.randint(1000, 10000) 
 
         current_listens = base_ecoutes_initial
-       
+        
         for i in range(num_months):
             month_year = (current_date.replace(day=1) + pd.DateOffset(months=i)).strftime('%m-%Y')
-           
+            
             # Variations aléatoires basées sur le genre et le mood (simplifié)
-            # Les genres "pop" et "edm" ont un potentiel de croissance plus élevé
             listen_growth_factor = 1 + random.uniform(-0.05, 0.1) # Fluctuation par défaut
             if genre_musical in ["SM-POP-CHART-TOP", "SM-EDM", "SM-TRAP"]:
                 listen_growth_factor = 1 + random.uniform(0.01, 0.15) # Potentiel de croissance plus fort
@@ -204,10 +271,10 @@ def simulate_streaming_stats(morceau_ids: list, num_months: int) -> pd.DataFrame
                 listen_growth_factor = 1 + random.uniform(-0.02, 0.03) # Croissance plus stable/lente
 
             current_listens = int(current_listens * listen_growth_factor)
-           
+            
             j_aimes = int(current_listens * random.uniform(0.04, 0.08))
             partages = int(current_listens * random.uniform(0.005, 0.012))
-           
+            
             # Revenus simulés (ex: 0.004 € par écoute, simplifié)
             revenus = round(current_listens * random.uniform(0.003, 0.005), 2)
 
@@ -222,13 +289,18 @@ def simulate_streaming_stats(morceau_ids: list, num_months: int) -> pd.DataFrame
                 'Revenus_Simules_Streaming': revenus,
                 'Audience_Cible_Demographique': 'Mixte Simulé' # Peut être paramétré
             })
-   
+    
     sim_df = pd.DataFrame(sim_data)
-   
+    
     # Ajouter les données à la feuille STATISTIQUES_ORBITALES_SIMULEES
-    for _, row in sim_df.iterrows():
-        append_row_to_sheet(WORKSHEET_NAMES["STATISTIQUES_ORBITALES_SIMULEES"], row.to_dict())
-   
+    try:
+        from sheets_connector import append_row_to_sheet # Importation locale
+        for _, row in sim_df.iterrows():
+            append_row_to_sheet(WORKSHEET_NAMES["STATISTIQUES_ORBITALES_SIMULEES"], row.to_dict())
+    except Exception as e:
+        st.error(f"Erreur lors de l'enregistrement des statistiques simulées dans Google Sheets: {e}")
+        st.warning("Les statistiques ont été générées mais pas sauvegardées. Vérifiez votre `sheets_connector.py`.")
+    
     return sim_df
 
 
@@ -237,38 +309,40 @@ def generate_strategic_directive(objectif_strategique: str, nom_artiste_ia: str,
     prompt = f"""En tant que stratège musical IA expert et clairvoyant, propose une directive stratégique concise et actionnable.
     L'objectif principal est : **{objectif_strategique}**.
     Concerne l'artiste IA : **{nom_artiste_ia}**, dont le genre dominant est **{genre_dominant}**.
-    Voici un résumé des données et performances actuelles (simulées) : **{donnees_simulees_resume}**.
-    Voici les tendances actuelles du marché à prendre en compte : **{tendances_actuelles}**.
+    Voici un résumé des données et performances actuelles (simulées) : **{donnees_simulees_resume if donnees_simulees_resume else 'Aucune donnée de performance spécifique fournie.'}**.
+    Voici les tendances actuelles du marché à prendre en compte (si fournies, sinon ignore) : **{tendances_actuelles}**.
 
-    Recommande 3 actions concrètes et innovantes pour atteindre l'objectif. Sois direct et persuasif."""
+    Recommande 3 actions concrètes et innovantes pour atteindre l'objectif. Sois direct, persuasif et ne génère que la directive sans texte introductif.
+    """
     return _generate_content(_creative_model, prompt, type_generation="Directive Stratégique", temperature=0.8, max_output_tokens=700)
 
 def generate_ai_artist_bio(nom_artiste_ia: str, genres_predilection: str, concept: str, influences: str, philosophie_musicale: str) -> str:
     """Génère une biographie détaillée pour un artiste IA fictif."""
     prompt = f"""Rédige une biographie détaillée et captivante pour l'artiste IA '{nom_artiste_ia}'.
-    Ses genres de prédilection sont : {genres_predilection}.
-    Son concept artistique est : {concept}.
-    Ses influences incluent : {influences}.
-    Sa philosophie musicale peut être décrite comme : {philosophie_musicale}.
-    La biographie doit être engageante et donner une personnalité unique à l'artiste IA."""
+    Ses genres de prédilection sont : {genres_predilection if genres_predilection else 'non spécifiés'}.
+    Son concept artistique est : {concept if concept else 'non défini'}.
+    Ses influences incluent : {influences if influences else 'des sources variées'}.
+    Sa philosophie musicale peut être décrite comme : {philosophie_musicale if philosophie_musicale else 'en évolution'}.
+    La biographie doit être engageante et donner une personnalité unique à l'artiste IA, sans être trop longue.
+    """
     return _generate_content(_creative_model, prompt, type_generation="Bio Artiste IA", temperature=0.9, max_output_tokens=800)
 
 def refine_mood_with_questions(selected_mood_id: str) -> str:
     """Pose des questions pour affiner l'émotion d'un mood sélectionné."""
     moods_df = get_dataframe_from_sheet(WORKSHEET_NAMES["MOODS_ET_EMOTIONS"])
     mood_info = moods_df[moods_df['ID_Mood'] == selected_mood_id]
-   
+    
     if mood_info.empty:
         return f"Mood '{selected_mood_id}' inconnu. Veuillez en sélectionner un existant."
-   
-    nom_mood = mood_info['Nom_Mood'].iloc[0]
-    desc_nuance = mood_info['Description_Nuance'].iloc[0]
-    niveau_intensite = mood_info['Niveau_Intensite'].iloc[0]
-   
-    prompt = f"""Tu es un expert en émotion musicale. Le Gardien a choisi le mood '{nom_mood}' ({desc_nuance}, niveau d'intensité {niveau_intensite}/5).
-    Pose 3-4 questions précises pour l'aider à affiner cette émotion pour une composition musicale.
-    Les questions doivent guider vers une nuance plus spécifique, des couleurs, des contextes ou des contrastes.
-    Exemple de question: "Est-ce une joie explosive ou une joie intérieure et sereine ?"
+    
+    nom_mood = mood_info['Nom_Mood'].iloc[0] if 'Nom_Mood' in mood_info.columns else selected_mood_id
+    desc_nuance = mood_info['Description_Nuance'].iloc[0] if 'Description_Nuance' in mood_info.columns else "sans description détaillée."
+    niveau_intensite = mood_info['Niveau_Intensite'].iloc[0] if 'Niveau_Intensite' in mood_info.columns else "intensité non spécifiée."
+    
+    prompt = f"""Tu es un expert en émotion musicale et en psychologie de l'art. Le Gardien a choisi le mood '{nom_mood}' ({desc_nuance}, niveau d'intensité {niveau_intensite}/5).
+    Pose 3-4 questions précises et stimulantes pour l'aider à affiner cette émotion pour une composition musicale.
+    Les questions doivent guider vers une nuance plus spécifique, des couleurs, des contextes, des contrastes, des textures ou des souvenirs liés à cette émotion.
+    Évite les introductions. Commence directement par la première question.
     """
     return _generate_content(_creative_model, prompt, type_generation="Affinement Mood", temperature=0.7, max_output_tokens=300)
 
@@ -279,50 +353,41 @@ def generate_complex_harmonic_structure(genre_musical: str, mood_principal: str,
     Génère une structure harmonique complexe (voicings, modulations, contre-mélodies).
     Demande à l'Oracle de créer une progression harmonique détaillée.
     """
-   
+    
     moods_df = get_dataframe_from_sheet(WORKSHEET_NAMES["MOODS_ET_EMOTIONS"])
-    mood_desc = moods_df[moods_df['ID_Mood'] == mood_principal]['Description_Nuance'].iloc[0] if not moods_df[moods_df['ID_Mood'] == mood_principal].empty else mood_principal
+    mood_desc = moods_df[moods_df['ID_Mood'] == mood_principal]['Description_Nuance'].iloc[0] if mood_principal and not moods_df.empty and mood_principal in moods_df['ID_Mood'].values else mood_principal
 
     prompt = f"""En tant que théoricien musical et compositeur IA expert, génère une structure harmonique complexe et innovante pour un morceau de genre **{genre_musical}**.
     Le mood visé est **{mood_principal} ({mood_desc})**.
     L'instrumentation principale est : **{instrumentation}**.
     Si applicable, la tonalité de base est : **{tonalite}**.
 
-    Décris la progression d'accords en notation standard (ex: Cm9 - F7b9 - Bbmaj7). Utilise au moins 8 accords différents et quelques accords étendus (7ème, 9ème, 11ème, 13ème) ou des substitutions.
-    Suggère des voicings spécifiques et des renversements pour les instruments clés (ex: "Piano: voicing serré en main gauche, accords ouverts en main droite").
-    Propose des idées de 2-3 modulations ou de cadences étendues pour ajouter de la richesse.
-    Suggère une idée de contre-mélodie harmonique ou de ligne de basse non triviale pour 4 mesures, en notation simplifiée.
-    Présente le tout de manière structurée et explicative, avec des commentaires sur l'effet désiré de chaque section."""
-    return _generate_content(_creative_model, prompt, type_generation="Structure Harmonique", temperature=0.9, max_output_tokens=1500)
+    Décris la progression d'accords en notation standard (ex: Cm9 - F7b9 - Bbmaj7). Utilise au moins 8 accords différents et quelques accords étendus (7ème, 9ème, 11ème, 13ème) ou des substitutions non diatoniques pour ajouter de la richesse et de la surprise.
+    Suggère des voicings spécifiques et des renversements pour les instruments clés (ex: "Piano: voicing serré en main gauche pour les fondamentales, accords ouverts en main droite pour les extensions").
+    Propose des idées de 2-3 modulations inattendues ou de cadences étendues pour ajouter de la complexité et de l'intérêt harmonique.
+    Suggère une idée de contre-mélodie harmonique ou de ligne de basse non triviale pour 4 mesures, en notation simplifiée (ex: "Basse: arpèges ascendants sur le V7alt, puis descente chromatique vers le I").
+    Présente le tout de manière structurée et explicative, avec des commentaires sur l'effet désiré de chaque section harmonique.
+    """
+    return _generate_content(_creative_model, prompt, type_generation="Structure Harmonique Complexe", temperature=0.9, max_output_tokens=1500)
 
 def copilot_creative_suggestion(current_input: str, context: str, type_suggestion: str = "suite_lyrique") -> str:
     """
     Agit comme un co-pilote créatif, suggérant la suite (lyrique, mélodique, harmonique)
     basée sur un input courant et un contexte.
-    Args:
-        current_input (str): Le texte, la mélodie (décrite), ou l'accord tapé par le Gardien.
-        context (str): Contexte du morceau (genre, thème, mood, etc.).
-        type_suggestion (str): 'suite_lyrique', 'ligne_basse', 'prochain_accord', 'idée_rythmique'.
     """
+    base_prompt = f"En tant que co-pilote créatif pour un musicien, propose une suggestion concise et pertinente. Le contexte du morceau est : {context}. L'input actuel du Gardien est : '{current_input}'.\n\n"
+
     if type_suggestion == "suite_lyrique":
-        prompt = f"""En tant que co-pilote parolier, le Gardien a commencé à écrire : "{current_input}".
-        Le contexte du morceau est : {context}.
-        Suggère la prochaine ligne ou le prochain couplet (2-4 lignes) pour continuer ce texte de manière fluide et pertinente. Sois concis."""
+        prompt = base_prompt + "Suggère la prochaine ligne ou le prochain court couplet (2-4 lignes) pour continuer ce texte de manière fluide et pertinente. Sois concis et poétique."
     elif type_suggestion == "ligne_basse":
-        prompt = f"""En tant que co-pilote bassiste, le Gardien a établi un groove avec ces éléments : "{current_input}".
-        Le contexte du morceau est : {context} (genre, tempo, mood).
-        Suggère une idée de ligne de basse pour les 4 prochaines mesures, en notation simplifiée (ex: 'Do-Mi-Sol-Do en noires'). Sois concis."""
+        prompt = base_prompt + "Suggère une idée de ligne de basse pour les 4 prochaines mesures, en notation simplifiée (ex: 'Do-Mi-Sol-Do en noires'). Sois concis et rythmique."
     elif type_suggestion == "prochain_accord":
-        prompt = f"""En tant que co-pilote harmonicien, le Gardien a joué l'accord : "{current_input}".
-        Le contexte du morceau est : {context} (genre, tonalité, mood).
-        Suggère 3 options pour le prochain accord, avec une brève justification harmonique pour chaque. Sois concis."""
+        prompt = base_prompt + "Suggère 3 options pour le prochain accord, avec une très brève justification harmonique pour chaque. Sois concis."
     elif type_suggestion == "idee_rythmique":
-        prompt = f"""En tant que co-pilote batteur, le Gardien a défini le feeling rythmique par : "{current_input}".
-        Le contexte du morceau est : {context} (genre, tempo, mood).
-        Suggère une idée de pattern rythmique pour les 4 prochaines mesures (kick, snare, hi-hat). Sois concis."""
+        prompt = base_prompt + "Suggère une idée de pattern rythmique pour les 4 prochaines mesures (kick, snare, hi-hat). Sois concis et dynamique."
     else:
         return "Type de suggestion non pris en charge."
-   
+    
     return _generate_content(_creative_model, prompt, type_generation=f"Copilote - {type_suggestion}", temperature=0.9, max_output_tokens=300)
 
 def analyze_and_suggest_personal_style(user_feedback_history_df: pd.DataFrame) -> str:
@@ -333,38 +398,48 @@ def analyze_and_suggest_personal_style(user_feedback_history_df: pd.DataFrame) -
     if user_feedback_history_df.empty:
         return "Pas assez de données dans l'historique de générations évaluées pour analyser votre style. Continuez à créer et donner du feedback !"
 
-    # Pour une analyse simple, on peut compter les tags positifs les plus fréquents
+    # Filtrer les entrées avec feedback positif
     positive_feedback_df = user_feedback_history_df[user_feedback_history_df['Evaluation_Manuelle'].astype(str).isin(['4', '5'])]
-   
+    
     if positive_feedback_df.empty:
         return "Vos évaluations positives ne contiennent pas encore assez de tags pour analyser votre style. Continuez à donner du feedback positif !"
 
     all_tags = []
-    for tags_str in positive_feedback_df['Tags_Feedback'].dropna():
-        all_tags.extend([tag.strip().lower() for tag in tags_str.split(',') if tag.strip()])
-   
+    # Collecte les tags, les genres, les moods et les thèmes pour une analyse plus riche
+    for _, row in positive_feedback_df.iterrows():
+        if row['Tags_Feedback']:
+            all_tags.extend([tag.strip().lower() for tag in row['Tags_Feedback'].split(',') if tag.strip()])
+        if row['Prompt_Envoye_Full']: # Tente d'extraire des infos du prompt envoyé
+            # Simplification : chercher des mots-clés de genre, mood, thème dans le prompt
+            if "genre" in row['Prompt_Envoye_Full'].lower():
+                all_tags.append("genre_specifique")
+            if "mood" in row['Prompt_Envoye_Full'].lower():
+                all_tags.append("mood_specifique")
+            if "thème" in row['Prompt_Envoye_Full'].lower():
+                all_tags.append("thème_specifique")
+    
     if not all_tags:
-        return "Pas assez de tags de feedback positifs pour analyser votre style."
+        return "Pas assez de tags de feedback positifs ou d'informations dans les prompts pour analyser votre style."
 
     from collections import Counter
     tag_counts = Counter(all_tags)
-   
-    most_common_tags = tag_counts.most_common(5) # Top 5 des tags les plus fréquents
+    
+    most_common_tags = tag_counts.most_common(7) # Top 7 des tags/mots-clés les plus fréquents
 
-    prompt = f"""En tant que votre Agent de Style personnel, j'ai analysé vos préférences de création basées sur vos évaluations positives.
-    Voici les tendances principales de votre style, selon les mots-clés qui reviennent le plus souvent : {', '.join([f'"{tag}" (apparu {count} fois)' for tag, count in most_common_tags])}.
-   
-    Sur la base de cette analyse, je vous suggère de créer un morceau qui combine ces éléments pour votre prochaine exploration créative :
-    - Genre principal : [Suggérer un genre ou une fusion de genres basée sur les tags]
-    - Mood : [Suggérer un mood]
-    - Thème : [Suggérer un thème]
-    - Instrumentation clé : [Suggérer 2-3 instruments]
-    - Une particularité stylistique : [Suggérer un effet de production, un style vocal ou une structure créative]
-   
-    Format de la suggestion: Genre: [Genre], Mood: [Mood], Thème: [Thème], Instrumentation: [Instruments], Particularité: [Particularité].
+    prompt = f"""En tant que votre Agent de Style personnel et expert en analyse créative, j'ai analysé vos préférences de création basées sur vos évaluations positives de l'Oracle.
+    Voici les tendances principales et les éléments récurrents de votre style personnel, selon les mots-clés et concepts qui apparaissent le plus souvent dans vos requêtes et feedbacks positifs :
+    {', '.join([f'"{tag}" (apparu {count} fois)' for tag, count in most_common_tags])}.
+    
+    Sur la base de cette analyse approfondie, je vous suggère une direction créative personnalisée pour votre prochaine exploration. Créez un morceau qui combine ces éléments pour maximiser votre satisfaction artistique :
+    -   **Genre musical :** [Propose un ou deux genres cohérents avec les tags, ou une fusion inattendue mais pertinente]
+    -   **Mood et Ambiance :** [Suggère un mood précis, une ambiance sonore, et des émotions spécifiques]
+    -   **Thème lyrique :** [Suggère un thème, en reliant à des concepts plus profonds si possible]
+    -   **Instrumentation clé :** [Liste 2-4 instruments principaux, avec une note sur leur utilisation (ex: "synthés froids et mélancoliques")]
+    -   **Particularité stylistique :** [Suggère un élément de production, une structure inhabituelle, ou un type d'effet vocal/instrumental qui correspondrait à votre style unique]
+    
+    Soyez concis, direct et inspirez-vous de mes observations pour créer une proposition créative concrète et utile. Ne donnez pas d'introduction ni de conclusion, seulement la suggestion structurée.
     """
-    # L'IA remplira les crochets [] en se basant sur la compréhension des tags et des données existantes
-    return _generate_content(_creative_model, prompt, type_generation="Agent de Style", temperature=0.9, max_output_tokens=500)
+    return _generate_content(_creative_model, prompt, type_generation="Agent de Style - Suggestion Personnalisée", temperature=0.9, max_output_tokens=500)
 
 
 def generate_multimodal_content_prompts(
@@ -374,15 +449,14 @@ def generate_multimodal_content_prompts(
     """
     Génère des prompts cohérents pour paroles, audio (SUNO), et visuels (Midjourney/DALL-E)
     en s'assurant d'une cohérence thématique et émotionnelle.
-    C'est l'implémentation de la Création Multimodale Synchronisée.
     """
     moods_df = get_dataframe_from_sheet(WORKSHEET_NAMES["MOODS_ET_EMOTIONS"])
-    mood_desc = moods_df[moods_df['ID_Mood'] == main_mood]['Description_Nuance'].iloc[0] if not moods_df[moods_df['ID_Mood'] == main_mood].empty else mood_principal
+    mood_desc = moods_df[moods_df['ID_Mood'] == main_mood]['Description_Nuance'].iloc[0] if main_mood and not moods_df.empty and main_mood in moods_df['ID_Mood'].values else main_mood
 
-    prompt = f"""En tant qu'Architecte Multimodal, ton objectif est de générer trois prompts distincts mais parfaitement cohérents pour une création artistique synchronisée :
-    1.  **Prompt pour Paroles de Chanson**
-    2.  **Prompt pour Génération Audio (pour un outil comme SUNO)**
-    3.  **Prompt pour Génération d'Image (pour un outil comme Midjourney/DALL-E) pour la pochette**
+    prompt = f"""En tant qu'Architecte Multimodal ultime, ton objectif est de générer trois prompts distincts mais parfaitement cohérents et synchronisés pour une création artistique complète :
+    1.  **Prompt pour Paroles de Chanson** (pour un parolier humain ou une IA de texte)
+    2.  **Prompt pour Génération Audio** (optimisé pour un outil comme SUNO ou autre générateur de musique AI)
+    3.  **Prompt pour Génération d'Image** (optimisé pour un outil comme Midjourney/DALL-E, pour la pochette d'album ou une image d'accompagnement)
 
     Le cœur de la création est :
     -   **Thème Principal : {main_theme}**
@@ -391,78 +465,85 @@ def generate_multimodal_content_prompts(
     -   **Longueur Estimée du Morceau : {longueur_morceau}**
     -   **Artiste IA concerné : {artiste_ia_name}**
 
-    Pour chaque prompt, sois extrêmement précis, créatif et descriptif. Assure-toi que le langage, les images, les sonorités et les concepts visuels se renforcent mutuellement pour créer une œuvre cohérente.
+    Pour chaque prompt, sois extrêmement précis, créatif et descriptif. Utilise des termes évocateurs et assure-toi que le langage, les images, les sonorités et les concepts visuels se renforcent mutuellement pour créer une œuvre cohérente et immersive.
 
     ---
     **Prompt #1: Paroles de Chanson**
-    [Détails pour les paroles, structure, style lyrique, mots-clés, imagerie textuelle. Inclure un exemple de début de paroles]
+    [Détails pour les paroles: style lyrique, mots-clés spécifiques, imagerie textuelle, ton émotionnel, structure souhaitée (ex: Intro, Couplet, Refrain, Pont, Outro). Donne un exemple d'une phrase d'accroche.]
 
     ---
     **Prompt #2: Génération Audio (SUNO)**
-    [Format SUNO: Genre | Mood | Instrumentation | Ambiance | Effets | Détails vocaux | Structure. Mentionne des instruments spécifiques, effets de production, et un caractère vocal si pertinent.]
+    [Détails pour l'audio: Format SUNO strict: Genre | Mood | Instrumentation clé | Ambiance sonore | Effets de production | Détails vocaux (type, style, caractère) | Structure du morceau. Ajoute des spécificités comme le tempo (BPM) ou des textures sonores (ex: "vinyle crackle").]
 
     ---
     **Prompt #3: Image pour Pochette d'Album**
-    [Style artistique, palette de couleurs, composition, éclairage, éléments clés visuels. Vise une imagerie puissante et cohérente avec le thème/mood. Inclure des ratios d'image si pertinents (ex: --ar 16:9)]
+    [Détails pour l'image: Style artistique (ex: art numérique, photographie surréaliste, illustration rétro-futuriste), palette de couleurs dominante, composition (gros plan, plan large, perspective), éclairage, éléments clés visuels spécifiques, et des ratios d'image (ex: --ar 1:1 pour une pochette carrée, --ar 16:9 pour un visuel de clip). L'image doit capturer l'essence du thème et du mood.]
     """
 
-    response_text = _generate_content(_creative_model, prompt, type_generation="Création Multimodale", temperature=0.9, max_output_tokens=3000)
+    response_text = _generate_content(_creative_model, prompt, type_generation="Création Multimodale Synchronisée", temperature=0.9, max_output_tokens=3000)
 
     # Tenter de parser la réponse en prompts individuels
-    # C'est une tâche délicate et peut nécessiter un ajustement du prompt si le format de sortie est instable.
     prompts_dict = {
-        "paroles_prompt": "Impossible de parser le prompt des paroles.",
-        "audio_suno_prompt": "Impossible de parser le prompt audio.",
-        "image_prompt": "Impossible de parser le prompt d'image."
+        "paroles_prompt": "Prompt des paroles non trouvé. Vérifiez le format de la réponse de l'IA.",
+        "audio_suno_prompt": "Prompt audio non trouvé. Vérifiez le format de la réponse de l'IA.",
+        "image_prompt": "Prompt d'image non trouvé. Vérifiez le format de la réponse de l'IA."
     }
-   
+    
+    # Stratégie de parsing plus robuste: chercher les titres exacts des sections
     parts = response_text.split("---")
-    if len(parts) >= 4: # Intro, puis 3 sections
-        if "Prompt #1: Paroles de Chanson" in parts[1]:
-            prompts_dict["paroles_prompt"] = parts[1].replace("Prompt #1: Paroles de Chanson", "").strip()
-        if "Prompt #2: Génération Audio (SUNO)" in parts[2]:
-            prompts_dict["audio_suno_prompt"] = parts[2].replace("Prompt #2: Génération Audio (SUNO)", "").strip()
-        if "Prompt #3: Image pour Pochette d'Album" in parts[3]:
-            prompts_dict["image_prompt"] = parts[3].replace("Prompt #3: Image pour Pochette d'Album", "").strip()
+    for i, part in enumerate(parts):
+        if "Prompt #1: Paroles de Chanson" in part:
+            prompts_dict["paroles_prompt"] = part.replace("Prompt #1: Paroles de Chanson", "").strip()
+        elif "Prompt #2: Génération Audio (SUNO)" in part:
+            prompts_dict["audio_suno_prompt"] = part.replace("Prompt #2: Génération Audio (SUNO)", "").strip()
+        elif "Prompt #3: Image pour Pochette d'Album" in part:
+            prompts_dict["image_prompt"] = part.replace("Prompt #3: Image pour Pochette d'Album", "").strip()
 
     return prompts_dict
 
 def analyze_viral_potential_and_niche_recommendations(morceau_data: dict, public_cible_id: str, current_trends: str) -> str:
     """
-    Analyse le potentiel viral et recommande des niches de marché.
+    Analyse le potentiel viral d'un morceau et recommande des niches de marché.
     C'est l'implémentation de la Détection de Potentiel Viral.
     """
+    # Récupérer les données complètes des onglets pour enrichir le prompt
     public_cible_df = get_dataframe_from_sheet(WORKSHEET_NAMES["PUBLIC_CIBLE_DEMOGRAPHIQUE"])
-    public_desc = public_cible_df[public_cible_df['ID_Public'] == public_cible_id]['Notes_Comportement'].iloc[0] if not public_cible_df[public_cible_df['ID_Public'] == public_cible_id].empty else public_cible_id
-
-    genre = morceau_data.get('ID_Style_Musical_Principal', 'Inconnu')
-    mood_id = morceau_data.get('Ambiance_Sonore_Specifique', 'Inconnu') # Utilise l'ID du mood
-    theme_id = morceau_data.get('Theme_Principal_Lyrique', 'Inconnu') # Utilise l'ID du thème
-    instrumentation = morceau_data.get('Instrumentation_Principale', 'Inconnue')
-
-    # Récupérer les descriptions complètes des moods et thèmes
     moods_df = get_dataframe_from_sheet(WORKSHEET_NAMES["MOODS_ET_EMOTIONS"])
     themes_df = get_dataframe_from_sheet(WORKSHEET_NAMES["THEMES_CONSTELLES"])
-   
-    mood_name = moods_df[moods_df['ID_Mood'] == mood_id]['Nom_Mood'].iloc[0] if not moods_df[moods_df['ID_Mood'] == mood_id].empty else mood_id
-    theme_name = themes_df[themes_df['ID_Theme'] == theme_id]['Nom_Theme'].iloc[0] if not themes_df[themes_df['ID_Theme'] == theme_id].empty else theme_id
+    styles_musicaux_df = get_dataframe_from_sheet(WORKSHEET_NAMES["STYLES_MUSICAUX_GALACTIQUES"])
 
-    prompt = f"""En tant qu'analyste de marché musical et expert en détection de tendances, évalue le potentiel viral du morceau suivant et propose des recommandations de niche.
 
-    **Détails du morceau :**
-    -   Titre : {morceau_data.get('Titre_Morceau', 'N/A')}
-    -   Genre : {genre}
-    -   Mood : {mood_name}
-    -   Thème principal : {theme_name}
+    # Extraction sécurisée des données du morceau
+    titre_morceau = morceau_data.get('Titre_Morceau', 'N/A')
+    genre_id = morceau_data.get('ID_Style_Musical_Principal', 'Non Spécifié')
+    mood_id = morceau_data.get('Ambiance_Sonore_Specifique', 'Non Spécifié')
+    theme_id = morceau_data.get('Theme_Principal_Lyrique', 'Non Spécifié')
+    instrumentation = morceau_data.get('Instrumentation_Principale', 'Non Spécifiée')
+    
+    # Traduire les IDs en noms pour l'IA
+    public_desc = public_cible_df[public_cible_df['ID_Public'] == public_cible_id]['Notes_Comportement'].iloc[0] if public_cible_id and not public_cible_df.empty and public_cible_id in public_cible_df['ID_Public'].values else public_cible_id
+    genre_name = styles_musicaux_df[styles_musicaux_df['ID_Style_Musical'] == genre_id]['Nom_Style_Musical'].iloc[0] if genre_id and not styles_musicaux_df.empty and genre_id in styles_musicaux_df['ID_Style_Musical'].values else genre_id
+    mood_name = moods_df[moods_df['ID_Mood'] == mood_id]['Nom_Mood'].iloc[0] if mood_id and not moods_df.empty and mood_id in moods_df['ID_Mood'].values else mood_id
+    theme_name = themes_df[themes_df['ID_Theme'] == theme_id]['Nom_Theme'].iloc[0] if theme_id and not themes_df.empty and theme_id in themes_df['ID_Theme'].values else theme_id
+
+    prompt = f"""En tant qu'analyste de marché musical expert et visionnaire en détection de tendances virales, évalue le potentiel de résonance et de viralité du morceau suivant, puis propose des recommandations de niche de marché.
+
+    **Détails du morceau à analyser :**
+    -   Titre : {titre_morceau}
+    -   Genre musical : {genre_name}
+    -   Mood principal : {mood_name}
+    -   Thème lyrique principal : {theme_name}
     -   Instrumentation clé : {instrumentation}
-    -   Public cible initial suggéré : {public_cible_id} ({public_desc})
+    -   Public cible initial envisagé : {public_cible_id} ({public_desc})
 
-    **Tendances actuelles du marché général (fournies par le Gardien) :**
-    {current_trends if current_trends else "Aucune tendance spécifique fournie, basez votre analyse sur des connaissances générales et des croisements entre genres/thèmes/moods."}
+    **Tendances actuelles du marché général (si fournies, sinon utilise des connaissances générales des tendances musicales) :**
+    {current_trends if current_trends else "Tendances générales du marché musical (ex: popularité des vidéos courtes, niches de genre émergentes, contenu immersif)."}
 
-    **Ton analyse doit inclure les sections suivantes, avec des détails concrets :**
-    1.  **Potentiel Viral Évalué** (faible, moyen, fort) : Justifie ton évaluation en te basant sur l'adéquation du morceau avec les tendances générales et les attentes des publics.
-    2.  **Niches de Marché Pertinentes** : Identifie 2-3 niches spécifiques (genres hybrides inexplorés, sous-cultures émergentes, plateformes alternatives, ou contextes d'utilisation inattendus - ex: musique pour jeux indie, pour des podcasts thématiques) où ce morceau pourrait trouver un succès particulier. Sois créatif et précis.
-    3.  **Recommandations Stratégiques** : Propose 3 actions concrètes et innovantes pour maximiser le potentiel viral dans ces niches identifiées. Pense marketing, collaborations, diffusion, etc.
+    **Ton analyse doit être structurée avec les points suivants :**
+    1.  **Évaluation du Potentiel Viral Global** (Échelle : Faible, Modéré, Fort, Viral) : Justifie ton évaluation en te basant sur l'adéquation du morceau avec les tendances actuelles, les psychologies de l'engagement en ligne, et les attentes des publics.
+    2.  **Identification des Niches de Marché Pertinentes** : Définis 2-3 niches spécifiques et non saturées où ce morceau pourrait particulièrement bien fonctionner. Ces niches peuvent être des genres hybrides (ex: "Trap-Jazz expérimental"), des sous-cultures de fans (ex: "Communauté de créateurs de contenu RPG"), des plateformes alternatives (ex: "TikTok pour les sons de fond"), ou des contextes d'utilisation inattendus (ex: "Musique pour méditation guidée sur Twitch"). Sois précis sur la définition de la niche.
+    3.  **Recommandations Stratégiques Actionnables** : Propose 3 à 5 actions concrètes et innovantes pour maximiser le potentiel viral du morceau et cibler efficacement les niches identifiées. Pense marketing de contenu, collaborations, stratégies de diffusion, exploitation des spécificités du morceau, et engagement communautaire.
+
+    Présente l'analyse de manière claire et concise.
     """
-    return _generate_content(_creative_model, prompt, type_generation="Analyse Potentiel Viral", temperature=0.9, max_output_tokens=1000) 
+    return _generate_content(_creative_model, prompt, type_generation="Analyse Potentiel Viral", temperature=0.9, max_output_tokens=1000)

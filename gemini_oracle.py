@@ -1,393 +1,349 @@
 # gemini_oracle.py
+
 import streamlit as st
 import google.generativeai as genai
-import json
-import random
-from datetime import datetime, timedelta
+from config import GEMINI_API_KEY_NAME, WORKSHEET_NAMES
+from sheets_connector import get_dataframe_from_sheet, add_historique_generation
+from utils import safe_cast_to_float, safe_cast_to_int
 import pandas as pd
+import random
+from datetime import datetime
 
-# Importe les configurations
-import config
-
-
+# --- Configuration de l'API Gemini ---
 try:
-    genai.configure(api_key=st.secrets["GEMINI_API_KEY"])
-    print("API Gemini configurée avec succès.")
+    genai.configure(api_key=st.secrets[GEMINI_API_KEY_NAME])
+    # Initialisation du modèle GenerativeModel pour le texte
+    _text_model = genai.GenerativeModel('gemini-1.5-flash')
+    # Pour les tâches plus créatives ou complexes
+    _creative_model = genai.GenerativeModel('gemini-1.5-pro')
+    st.session_state['gemini_initialized'] = True
 except Exception as e:
-    st.error("Erreur de configuration de l'API Gemini. Assurez-vous que 'GEMINI_API_KEY' est définie dans votre fichier .streamlit/secrets.toml")
-    st.stop()
+    st.error(f"Erreur d'initialisation de l'API Gemini. Assurez-vous que votre clé API est correcte dans .streamlit/secrets.toml : {e}")
+    st.session_state['gemini_initialized'] = False
+    _text_model = None
+    _creative_model = None # Fallback pour éviter les erreurs si non initialisé
 
-gemini_model = genai.GenerativeModel('gemini-1.5-flash') # Ou gemini-2.5-flash si vous l'avez mis à jour
 
-# --- Fonctions de Génération de Contenu (Texte, Prompts, Kit de Lancement) ---
+# --- Fonctions d'Interaction avec l'Oracle Gemini ---
 
-def generate_erotic_text(theme, mood, length_words, protagonist_type, setting,
-                        pov, spiciness, tropes, plot_elements=None, character_details=None,
-                        writing_style_description=None): # NOUVEAU: Paramètre de style
-    theme_str = str(theme).strip() if theme is not None else "général"
-    mood_str = str(mood).strip() if mood is not None else "sensuel"
-    protagoniste_type_str = str(protagonist_type).strip() if protagonist_type is not None else "humain"
-    setting_str = str(setting).strip() if setting is not None else "futuriste"
-    pov_str = str(pov).strip() if pov is not None else "troisième personne"
-    spiciness_str = str(spiciness).strip() if spiciness is not None else "modéré"
+def _generate_content(model, prompt: str, temperature: float = 0.7, max_output_tokens: int = 1024) -> str:
+    """
+    Fonction interne pour générer du contenu avec Gemini et logger l'interaction.
+    """
+    if not st.session_state.get('gemini_initialized', False) or model is None:
+        return "L'API Gemini n'est pas initialisée. Veuillez vérifier votre clé API."
     
-    trope_str_part = ""
-    if tropes and isinstance(tropes, list) and all(isinstance(t, str) for t in tropes):
-        trope_str_part = f"Inclure les tropes/fétiches suivants : {', '.join(tropes)}."
-
-    plot_str_part = ""
-    if plot_elements and isinstance(plot_elements, list) and all(isinstance(p, str) for p in plot_elements):
-        plot_str_part = f"Éléments clés de l'intrigue : {'; '.join(plot_elements)}."
-
-    character_str_part = ""
-    if character_details and isinstance(character_details, list) and all(isinstance(c, str) for c in character_details):
-        character_str_part = f"Détails sur les personnages : {'; '.join(character_details)}."
-
-    style_directive = ""
-    if writing_style_description and writing_style_description.strip():
-        style_directive = f"Adaptez le style d'écriture comme suit : {writing_style_description}"
-
-    prompt = f"""Génère une histoire érotique immersive d'environ {length_words} mots.
-    Thème principal : {theme_str}
-    Ambiance/Ton : {mood_str}
-    Point de vue : {pov_str}
-    Niveau de sensualité/spiciness : {spiciness_str}
-    Type de protagoniste : {protagoniste_type_str}
-    Cadre : {setting_str}
-    {trope_str_part}
-    {plot_str_part}
-    {character_str_part}
-    {style_directive}
-
-    Le texte doit être riche en détails sensoriels et en émotions. Il doit captiver le lecteur et l'immerger dans une expérience de plaisir intense. Utilise un langage évocateur et respecte l'ambiance, le thème, le point de vue et le niveau de sensualité choisis. Vise l'originalité et la profondeur.
-    """
     try:
-        response = gemini_model.generate_content(prompt)
-        return response.text.strip()
-    except Exception as e:
-        st.error(f"Erreur lors de la génération du texte érotique par Gemini : {e}")
-        return "Désolé, je n'ai pas pu générer le texte pour le moment."
-
-def generate_erotic_text_suite(previous_text_summary, previous_characters_summary, previous_plot_summary, 
-                                sequel_directives, length_words, writing_style_description=None): # NOUVEAU: Paramètre de style
-    """
-    Génère la suite d'un texte érotique, en tenant compte du contexte précédent.
-    """
-    previous_text_summary_str = str(previous_text_summary).strip() if previous_text_summary is not None else ""
-    previous_characters_summary_str = str(previous_characters_summary).strip() if previous_characters_summary is not None else ""
-    previous_plot_summary_str = str(previous_plot_summary).strip() if previous_plot_summary is not None else ""
-    sequel_directives_str = str(sequel_directives).strip() if sequel_directives is not None else ""
-
-    style_directive = ""
-    if writing_style_description and writing_style_description.strip():
-        style_directive = f"Adaptez le style d'écriture comme suit : {writing_style_description}"
-
-    prompt = f"""Tu es un conteur expert. Génère la suite captivante d'une histoire érotique existante.
-    Le nouveau tome doit être d'environ {length_words} mots et assurer une continuité narrative et émotionnelle.
-
-    Contexte du tome précédent :
-    Résumé de l'intrigue principale : {previous_plot_summary_str}
-    Détails importants sur les personnages : {previous_characters_summary_str}
-
-    Directives spécifiques pour ce nouveau tome :
-    {sequel_directives_str}
-    {style_directive}
-
-    Le texte doit respecter le ton et le niveau de sensualité de l'œuvre originale, tout en introduisant de nouveaux développements excitants.
-    """
-    try:
-        response = gemini_model.generate_content(prompt)
-        return response.text.strip()
-    except Exception as e:
-        st.error(f"Erreur lors de la génération de la suite du texte érotique par Gemini : {e}")
-        return "Désolé, je n'ai pas pu générer la suite pour le moment."
-
-def generate_image_prompts(text_content):
-    prompt = f"""Basé sur le texte érotique suivant, génère 3 prompts distincts et très descriptifs pour un générateur d'images comme Midjourney ou Stable Diffusion. Chaque prompt doit capturer l'essence sensorielle et visuelle du texte.
-    Les prompts doivent être concis but détaillés, en utilisant des mots-clés forts pour l'imagerie érotique et artistique. Incluez des styles visuels (ex: photoréaliste, cyberpunk, peinture à l'huile).
-    Sépare chaque prompt par '---PROMPT---'.
-
-    Texte :
-    {text_content}
-    """
-    try:
-        response = gemini_model.generate_content(prompt)
-        raw_prompts = response.text.strip().split('---PROMPT---')
-        cleaned_prompts = [p.strip() for p in raw_prompts if p.strip()]
-        return cleaned_prompts
-    except Exception as e:
-        st.error(f"Erreur lors de la génération des prompts d'image par Gemini : {e}")
-        return []
-
-def generate_launch_kit(text_content):
-    prompt = f"""En tant que Directeur de la Stratégie pour le CARTEL DES PLAISIRS, analyse le texte érotique suivant et génère un "Kit de Lancement" optimisé pour la visibilité et l'engagement sur des plateformes de monétisation.
-
-    Fournis les éléments suivants :
-    1.  **Trois (3) titres très accrocheurs et optimisés pour le clic**, séparés par des tirets (-). Chaque titre doit être unique.
-    2.  **Un (1) résumé captivant de 200 mots maximum**, qui intrigue sans trop en révéler, mettant en avant les thèmes clés et l'ambiance.
-    3.  **Une liste des dix (10) tags les plus pertinents et recherchés**, classés par pertinence pour le marché érotique et la découverte. Sépare les tags par des virgules (,).
-
-    Le format de sortie doit être le suivant :
-    TITRES: [Titre 1] - [Titre 2] - [Titre 3]
-    RÉSUMÉ: [Votre résumé ici]
-    TAGS: [tag1, tag2, tag3, ...]
-
-    Texte :
-    {text_content}
-    """
-    try:
-        response = gemini_model.generate_content(prompt)
-        response_text = response.text.strip()
-        titles = []
-        summary = ""
-        tags = []
-
-        lines = response_text.split('\n')
-        for line in lines:
-            if line.startswith("TITRES:"):
-                titles = [t.strip() for t in line[len("TITRES:"):].split('-') if t.strip()]
-            elif line.startswith("RÉSUMÉ:"):
-                summary = line[len("RÉSUMÉ:"):].strip()
-            elif line.startswith("TAGS:"):
-                tags = [t.strip() for t in line[len("TAGS:"):].split(',') if t.strip()]
-
-        return {"titles": titles, "summary": summary, "tags": tags}
-    except Exception as e:
-        st.error(f"Erreur lors de la génération du kit de lancement par Gemini : {e}")
-        return {"titles": [], "summary": "", "tags": []}
-
-# --- Fonctions d'Analyse de Contenu (pour le pré-remplissage des suites) ---
-
-def summarize_plot(full_text):
-    """
-    Génère un résumé concis de l'intrigue à partir d'un texte donné.
-    """
-    prompt = f"""En tant qu'analyste narratif, résumez l'intrigue principale du texte suivant en 150 mots maximum. Concentrez-vous sur les événements clés, les conflits et la progression narrative.
-
-    Texte :
-    {full_text[:10000]}
-    """
-    try:
-        response = gemini_model.generate_content(prompt)
-        return response.text.strip()
-    except Exception as e:
-        st.error(f"Erreur lors de la génération du résumé de l'intrigue : {e}")
-        return "Impossible de générer le résumé de l'intrigue."
-
-def extract_character_details(full_text):
-    """
-    Extrait les noms, traits clés et relations des personnages principaux d'un texte donné.
-    """
-    prompt = f"""En tant qu'analyste de personnages, extrayez les personnages principaux du texte suivant. Pour chaque personnage, indiquez son nom, 2-3 traits de personnalité clés et sa relation principale avec d'autres personnages ou son rôle dans l'intrigue.
-    Présentez les informations sous forme de liste concise. Si aucun personnage majeur n'est identifiable, indiquez 'Aucun personnage majeur identifié.'.
-
-    Texte :
-    {full_text[:10000]}
-    """
-    try:
-        response = gemini_model.generate_content(prompt)
-        return response.text.strip()
-    except Exception as e:
-        st.error(f"Erreur lors de l'extraction des détails des personnages : {e}")
-        return "Impossible d'extraire les détails des personnages."
-
-# --- Fonctions de Génération de Données Simulées (pour le remplissage auto des onglets) ---
-
-def generate_simulated_market_trends(num_entries, start_date_str, overall_sentiment, dominant_genres, specific_kinks):
-    """
-    Génère des entrées de tendances marché simulées.
-    """
-    genres_str = ", ".join(dominant_genres) if dominant_genres else "romance, fantasy"
-    kinks_str = ", ".join(specific_kinks) if specific_kinks else "bdsm, inceste, tabou, monstergirl"
-
-    prompt = f"""En tant qu'analyste de marché pour la littérature érotique numérique, simulez des entrées de données de tendances de marché.
-    Générez {num_entries} entrées, commençant à la date {start_date_str}.
-
-    Contexte du marché général: {overall_sentiment}
-    Genres dominants à prioriser: {genres_str}
-    Kinks/thèmes spécifiques à inclure: {kinks_str}
-
-    Pour chaque entrée, fournissez les champs suivants dans un format JSON valide. La liste JSON doit contenir des objets pour chaque entrée.
-    Chaque objet doit avoir les clés exactes suivantes et des valeurs cohérentes:
-    - "Date_Analyse" (formatYYYY-MM-DD, dates séquentielles ou semi-aléatoires mais croissantes)
-    - "Niche_Identifiee" (ex: "Fantasy érotique elfique", "Romance cyberpunk dystopique")
-    - "Popularite_Score" (nombre entre 1 et 10, reflétant le sentiment général)
-    - "Competition_Niveau" (choix parmi "Faible", "Moyen", "Élevé")
-    - "Mots_Cles_Associes" (liste de 5-10 mots-clés pertinents, séparés par des virgules)
-    - "Tendances_Generales" (observation brève de la tendance)
-    - "Source_Information" (toujours "Oracle Simulation")
-
-    Exemple de format de sortie JSON (array d'objets) :
-    [
-        {{
-            "Date_Analyse": "2024-01-15",
-            "Niche_Identifiee": "Romance historique vampirique",
-            "Popularite_Score": 7,
-            "Competition_Niveau": "Moyen",
-            "Mots_Cles_Associes": "vampire, historique, romance, gothique, sang, immortel",
-            "Tendances_Generales": "Niche stable avec une base de fans fidèle.",
-            "Source_Information": "Oracle Simulation"
-        }}
-    ]
-    """
-    try:
-        response = gemini_model.generate_content(prompt)
-        json_str = response.text.strip()
-        start_idx = json_str.find('[')
-        end_idx = json_str.rfind(']')
-        if start_idx != -1 and end_idx != -1:
-            json_str = json_str[start_idx : end_idx + 1]
+        response = model.generate_content(
+            prompt,
+            generation_config=genai.types.GenerationConfig(
+                candidate_count=1,
+                temperature=temperature,
+                max_output_tokens=max_output_tokens
+            )
+        )
+        generated_text = response.text
         
-        data = json.loads(json_str)
-        return data
+        # Log l'interaction dans l'historique
+        log_data = {
+            'Type_Generation': 'Contenu Général',
+            'Prompt_Envoye_Full': prompt,
+            'Reponse_Recue_Full': generated_text,
+            'ID_Morceau_Associe': '', # À remplir spécifiquement dans les fonctions d'appel
+            'Evaluation_Manuelle': '',
+            'Commentaire_Qualitatif': '',
+            'Tags_Feedback': '',
+            'ID_Regle_Appliquee_Auto': ''
+        }
+        add_historique_generation(log_data) # Sauvegarde le log
+        
+        return generated_text
     except Exception as e:
-        st.error(f"Erreur lors de la génération des tendances marché simulées : {e}. Réponse brute : {response.text}")
-        return []
+        st.error(f"Erreur lors de la génération de contenu avec Gemini: {e}")
+        return f"Désolé, une erreur est survenue lors de la génération: {e}"
 
-def generate_simulated_performance_data(oeuvre_ids, num_months, start_month_year_str, base_revenue=100, growth_factor=0.05):
-    """
-    Génère des entrées de performance mensuelle simulées pour des œuvres.
-    """
-    generated_data = []
+# --- Fonctions de Génération de Contenu Spécifiques ---
+
+def generate_song_lyrics(
+    genre_musical: str, mood_principal: str, theme_lyrique_principal: str,
+    style_lyrique: str, mots_cles_generation: str, structure_chanSONG: str,
+    langue_paroles: str, niveau_langage_paroles: str, imagerie_texte: str
+) -> str:
+    """Génère des paroles de chanson complètes."""
     
-    try:
-        start_date = datetime.strptime(f"01-{start_month_year_str}", "%d-%m-%Y")
-    except ValueError:
-        st.error("Format de date de début invalide. Utilisez MM-YYYY.")
-        return []
+    styles_lyriques_df = get_dataframe_from_sheet("STYLES_LYRIQUES_UNIVERS")
+    themes_df = get_dataframe_from_sheet("THEMES_CONSTELLES")
+    moods_df = get_dataframe_from_sheet("MOODS_ET_EMOTIONS")
+    structures_df = get_dataframe_from_sheet("STRUCTURES_SONG_UNIVERSELLES")
+
+    # Récupérer les descriptions détaillées pour un meilleur prompt
+    style_lyrique_desc = styles_lyriques_df[styles_lyriques_df['ID_Style_Lyrique'] == style_lyrique]['Description_Detaillee'].iloc[0] if not styles_lyriques_df[styles_lyriques_df['ID_Style_Lyrique'] == style_lyrique].empty else style_lyrique
+    theme_desc = themes_df[themes_df['ID_Theme'] == theme_lyrique_principal]['Description_Conceptuelle'].iloc[0] if not themes_df[themes_df['ID_Theme'] == theme_lyrique_principal].empty else theme_lyrique_principal
+    mood_desc = moods_df[moods_df['ID_Mood'] == mood_principal]['Description_Nuance'].iloc[0] if not moods_df[moods_df['ID_Mood'] == mood_principal].empty else mood_principal
+    structure_schema = structures_df[structures_df['ID_Structure'] == structure_chanSONG]['Schema_Detaille'].iloc[0] if not structures_df[structures_df['ID_Structure'] == structure_chanSONG].empty else structure_chanSONG
+    
+    prompt = f"""Agis comme un parolier expert, poétique et sensible.
+    Génère des paroles complètes pour une chanson dans le genre **{genre_musical}**.
+    Le mood principal est **{mood_principal} ({mood_desc})**.
+    Le thème principal est **{theme_lyrique_principal} ({theme_desc})**.
+    Utilise un style lyrique **{style_lyrique} ({style_lyrique_desc})**.
+    Inclus les mots-clés ou concepts suivants: **{mots_cles_generation}**.
+    La structure de la chanson doit être: **{structure_chanSONG} ({structure_schema})**.
+    La langue des paroles est **{langue_paroles}**, avec un niveau de langage **{niveau_langage_paroles}**.
+    L'imagerie textuelle doit être **{imagerie_texte}**.
+
+    Respecte scrupuleusement la structure demandée (Intro, Couplet, Refrain, Pont, Outro etc. si applicable). Chaque section doit être clairement identifiée.
+    """
+    return _generate_content(_creative_model, prompt, temperature=0.9, max_output_tokens=2000)
+
+def generate_audio_prompt(
+    genre_musical: str, mood_principal: str, duree_estimee: str,
+    instrumentation_principale: str, ambiance_sonore_specifique: str,
+    effets_production_dominants: str, type_voix_desiree: str = "N/A",
+    style_vocal_desire: str = "N/A", caractere_voix_desire: str = "N/A",
+    structure_song: str = "N/A"
+) -> str:
+    """Génère un prompt textuel détaillé pour la génération audio (optimisé pour SUNO)."""
+    
+    moods_df = get_dataframe_from_sheet("MOODS_ET_EMOTIONS")
+    mood_desc = moods_df[moods_df['ID_Mood'] == mood_principal]['Description_Nuance'].iloc[0] if not moods_df[moods_df['ID_Mood'] == mood_principal].empty else mood_principal
+
+    vocal_details = ""
+    if type_voix_desiree != "N/A":
+        vocal_details = f"Avec une voix {type_voix_desiree} de style {style_vocal_desire} et de caractère {caractere_voix_desire}. "
+
+    prompt = f"""Crée un prompt détaillé pour un générateur audio comme SUNO. La musique doit être de genre **{genre_musical}**.
+    Le mood est **{mood_principal} ({mood_desc})**.
+    La durée visée est d'environ **{duree_estimee}**.
+    L'instrumentation principale doit inclure : **{instrumentation_principale}**.
+    L'ambiance sonore spécifique doit être : **{ambiance_sonore_specifique}**.
+    Les effets de production dominants sont : **{effets_production_dominants}**.
+    {vocal_details}
+    La structure du morceau est : **{structure_song}**.
+
+    Le prompt doit être concis, descriptif, et utiliser des termes musicaux évocateurs.
+    Exemple de format : [Genre] | [Mood] | [Instrumentation] | [Ambiance] | [Effets] | [Détails vocaux] | [Structure]
+    """
+    return _generate_content(_text_model, prompt, temperature=0.8, max_output_tokens=500)
+
+def generate_title_ideas(theme_principal: str, genre_musical: str, paroles_extrait: str = "") -> str:
+    """Propose plusieurs idées de titres de chansons."""
+    prompt = f"""Génère 10 idées de titres de chansons accrocheurs et pertinents.
+    Le thème principal est **{theme_principal}**.
+    Le genre musical est **{genre_musical}**.
+    Si des paroles sont fournies, inspire-toi-en : "{paroles_extrait}"
+    Présente les titres sous forme de liste numérotée."""
+    return _generate_content(_text_model, prompt, temperature=0.7)
+
+def generate_marketing_copy(titre_morceau: str, genre_musical: str, mood_principal: str, public_cible: str, point_fort_principal: str) -> str:
+    """Génère un texte de description marketing court."""
+    public_cible_df = get_dataframe_from_sheet("PUBLIC_CIBLE_DEMOGRAPHIQUE")
+    public_desc = public_cible_df[public_cible_df['ID_Public'] == public_cible]['Notes_Comportement'].iloc[0] if not public_cible_df[public_cible_df['ID_Public'] == public_cible].empty else public_cible
+
+    prompt = f"""Rédige une description marketing courte (maximum 60 mots) pour le morceau '{titre_morceau}'.
+    Genre: {genre_musical}. Mood: {mood_principal}.
+    Cible le public: {public_cible} ({public_desc}).
+    Mets en avant le point fort principal: {point_fort_principal}.
+    Ajoute un appel à l'action et 3-5 hashtags pertinents. Sois engageant."""
+    return _generate_content(_text_model, prompt, temperature=0.7, max_output_tokens=200)
+
+def generate_album_art_prompt(nom_album: str, genre_dominant_album: str, description_concept_album: str, mood_principal: str, mots_cles_visuels_suppl: str) -> str:
+    """Crée un prompt détaillé pour une IA génératrice d'images (Midjourney/DALL-E)."""
+    moods_df = get_dataframe_from_sheet("MOODS_ET_EMOTIONS")
+    mood_desc = moods_df[moods_df['ID_Mood'] == mood_principal]['Description_Nuance'].iloc[0] if not moods_df[moods_df['ID_Mood'] == mood_principal].empty else mood_principal
+
+    prompt = f"""Crée un prompt visuel détaillé et évocateur pour une IA génératrice d'images (comme Midjourney ou DALL-E) pour la pochette de l'album '{nom_album}'.
+    Le genre dominant est **{genre_dominant_album}**.
+    Le concept de l'album est : **{description_concept_album}**.
+    Le mood visuel doit être : **{mood_principal} ({mood_desc})**.
+    Inclus les mots-clés visuels supplémentaires : **{mots_cles_visuels_suppl}**.
+    Précise le style artistique souhaité (ex: photographie, peinture numérique, illustration 3D, pixel art, style expressionniste, etc.), la palette de couleurs, la composition et l'éclairage.
+    """
+    return _generate_content(_creative_model, prompt, temperature=0.9, max_output_tokens=1000)
+
+def simulate_streaming_stats(morceau_id: str, num_months: int, base_ecoutes: int) -> pd.DataFrame:
+    """Simule des statistiques d'écoute pour un morceau."""
+    
+    morceaux_df = get_dataframe_from_sheet("MORCEAUX_GENERES")
+    stats_df = get_dataframe_from_sheet("STATISTIQUES_ORBITALES_SIMULEES")
+
+    morceau = morceaux_df[morceaux_df['ID_Morceau'] == morceau_id]
+    if morceau.empty:
+        st.error(f"Morceau avec ID {morceau_id} introuvable pour la simulation.")
+        return pd.DataFrame()
+
+    titre_morceau = morceau['Titre_Morceau'].iloc[0]
+    genre_musical = morceau['ID_Style_Musical_Principal'].iloc[0]
+
+    sim_data = []
+    current_listens = base_ecoutes
+    current_date = datetime.now()
 
     for i in range(num_months):
-        current_year = start_date.year + (start_date.month + i - 1) // 12
-        current_month = (start_date.month + i - 1) % 12 + 1
-        current_date_obj = datetime(current_year, current_month, 1)
-        month_year = current_date_obj.strftime("%m-%Y")
+        month_year = (current_date.replace(day=1) + pd.DateOffset(months=i)).strftime('%m-%Y')
         
-        for oeuvre_id in oeuvre_ids:
-            revenue = round(base_revenue * (1 + growth_factor * i) * (1 + (random.random() - 0.5) * 0.4), 2)
-            views = int(revenue * random.randint(10, 20) * (1 + (random.random() - 0.5) * 0.1))
-            engagement_score = round(random.uniform(3.0, 5.0), 1)
-            
-            generated_data.append({
-                "ID_Oeuvre": oeuvre_id,
-                "Mois_Annee": month_year,
-                "Revenus_Nets": revenue,
-                "Vues_Telechargements": views,
-                "Engagement_Score": engagement_score,
-                "Commentaires_Mois": f"Performance stable ce mois-ci pour l'œuvre {oeuvre_id}."
-            })
-    return generated_data
+        # Variations aléatoires basées sur le genre et le mood (simplifié)
+        listen_growth_factor = 1 + (random.uniform(-0.05, 0.1) if genre_musical in ["SM-POP-CHART-TOP", "SM-EDM"] else random.uniform(-0.03, 0.05))
+        current_listens = int(current_listens * listen_growth_factor)
+        
+        j_aimes = int(current_listens * random.uniform(0.05, 0.08))
+        partages = int(current_listens * random.uniform(0.005, 0.01))
+        
+        # Revenus simulés (ex: 0.005 € par écoute, très simplifié)
+        revenus = round(current_listens * random.uniform(0.003, 0.007), 2)
 
-# --- Fonction pour générer une directive stratégique ---
-def generate_strategic_directive(creative_goal, market_trends_data, performance_data):
-    """
-    Génère une directive stratégique basée sur les objectifs, les tendances du marché et les performances.
-    """
-    market_str = "Aucune donnée de tendance marché disponible."
-    if not market_trends_data.empty:
-        market_trends_data['Popularite_Score'] = pd.to_numeric(market_trends_data['Popularite_Score'], errors='coerce').fillna(0)
-        top_niches = market_trends_data.sort_values(by='Popularite_Score', ascending=False).head(3)
-        trending_keywords = market_trends_data['Mots_Cles_Associes'].dropna().str.split(', ').explode().value_counts().head(5).index.tolist()
-        
-        market_str = "\nTendances Marché Clés:\n"
-        for idx, row in top_niches.iterrows():
-            market_str += f"- Niche: {row['Niche_Identifiee']} (Popularité: {row['Popularite_Score']}, Compétition: {row['Competition_Niveau']})\n"
-        market_str += f"Mots-clés en vogue: {', '.join(trending_keywords)}\n"
-        
-        market_str += "Observations Générales:\n"
-        for obs in market_trends_data['Tendances_Generales'].unique()[:3]:
-            market_str += f"- {obs}\n"
+        sim_data.append({
+            'ID_Stat_Simulee': generate_unique_id('SS'),
+            'ID_Morceau': morceau_id,
+            'Mois_Annee_Stat': month_year,
+            'Plateforme_Simulee': 'Simulée', # Peut être paramétré
+            'Ecoutes_Totales': current_listens,
+            'J_aimes_Recus': j_aimes,
+            'Partages_Simules': partages,
+            'Revenus_Simules_Streaming': revenus,
+            'Audience_Cible_Demographique': 'Mixte Simulé' # Peut être paramétré
+        })
     
-    performance_str = "Aucune donnée de performance disponible."
-    if not performance_data.empty:
-        performance_data['Revenus_Nets'] = pd.to_numeric(performance_data['Revenus_Nets'], errors='coerce').fillna(0)
-        total_revenues = performance_data['Revenus_Nets'].sum()
-        top_earners = performance_data.groupby('ID_Oeuvre')['Revenus_Nets'].sum().nlargest(3)
-        
-        performance_str = f"\nPerformance du Portfolio:\n"
-        performance_str += f"- Revenus nets cumulés: {total_revenues:.2f} €\n"
-        performance_str += "Top 3 des œuvres par revenus:\n"
-        for oeuvre_id, revenue in top_earners.items():
-            performance_str += f"- {oeuvre_id}: {revenue:.2f} €\n"
-        
-        avg_engagement = performance_data['Engagement_Score'].mean()
-        performance_str += f"Score d'engagement moyen: {avg_engagement:.1f}/5\n"
+    sim_df = pd.DataFrame(sim_data)
+    
+    # Ajouter les données à la feuille STATISTIQUES_ORBITALES_SIMULEES
+    for _, row in sim_df.iterrows():
+        append_row_to_sheet("STATISTIQUES_ORBITALES_SIMULEES", row.to_dict())
+    
+    return sim_df
 
-    prompt = f"""En tant que Directeur de la Stratégie du "CARTEL DES PLAISIRS", votre rôle est de fournir une directive stratégique claire et actionable au Gardien.
+def generate_strategic_directive(objectif_strategique: str, nom_artiste_ia: str, genre_dominant: str, donnees_simulees_resume: str, tendances_actuelles: str) -> str:
+    """Fournit des conseils stratégiques basés sur des données."""
+    prompt = f"""En tant que stratège musical IA expert et clairvoyant, propose une directive stratégique concise et actionnable.
+    L'objectif principal est : **{objectif_strategique}**.
+    Concerne l'artiste IA : **{nom_artiste_ia}**, dont le genre dominant est **{genre_dominant}**.
+    Voici un résumé des données et performances actuelles (simulées) : **{donnees_simulees_resume}**.
+    Voici les tendances actuelles du marché à prendre en compte : **{tendances_actuelles}**.
 
-    **Objectif du Gardien :** {creative_goal}
+    Recommande 3 actions concrètes et innovantes pour atteindre l'objectif. Sois direct et persuasif."""
+    return _generate_content(_creative_model, prompt, temperature=0.8, max_output_tokens=700)
 
-    **Analyse du Marché :**
-    {market_str}
+def generate_ai_artist_bio(nom_artiste_ia: str, genres_predilection: str, concept: str, influences: str, philosophie_musicale: str) -> str:
+    """Génère une biographie détaillée pour un artiste IA fictif."""
+    prompt = f"""Rédige une biographie détaillée et captivante pour l'artiste IA '{nom_artiste_ia}'.
+    Ses genres de prédilection sont : {genres_predilection}.
+    Son concept artistique est : {concept}.
+    Ses influences incluent : {influences}.
+    Sa philosophie musicale peut être décrite comme : {philosophie_musicale}.
+    La biographie doit être engageante et donner une personnalité unique à l'artiste IA."""
+    return _generate_content(_creative_model, prompt, temperature=0.9, max_output_tokens=800)
 
-    **Performance Historique :**
-    {performance_str}
-
-    **Sur la base de ces informations, élaborez une directive stratégique concise et impactante, incluant :**
-    1.  **Recommandations Clés :** Quelles niches, thèmes, styles narratifs ou de couverture devraient être prioritaires.
-    2.  **Stratégies d'Action :** Conseils sur la production (standalone vs. séries), la promotion, ou l'expérimentation.
-    3.  **Opportunités/Risques :** Points à surveiller ou à exploiter.
-    4.  **Prochaine Étape Concrète :** Une action immédiate ou une direction pour les 1-3 prochains mois.
-    5.  **Titre de la Directive :** Un titre accrocheur pour cette directive.
-
-    Le ton doit être professionnel, perspicace et motivant. La directive ne doit pas dépasser 300 mots.
+def refine_mood_with_questions(selected_mood_id: str) -> str:
+    """Pose des questions pour affiner l'émotion d'un mood sélectionné."""
+    moods_df = get_dataframe_from_sheet("MOODS_ET_EMOTIONS")
+    mood_info = moods_df[moods_df['ID_Mood'] == selected_mood_id]
+    
+    if mood_info.empty:
+        return f"Mood '{selected_mood_id}' inconnu. Veuillez en sélectionner un existant."
+    
+    nom_mood = mood_info['Nom_Mood'].iloc[0]
+    desc_nuance = mood_info['Description_Nuance'].iloc[0]
+    niveau_intensite = mood_info['Niveau_Intensite'].iloc[0]
+    
+    prompt = f"""Tu es un expert en émotion musicale. Le Gardien a choisi le mood '{nom_mood}' ({desc_nuance}, niveau d'intensité {niveau_intensite}/5).
+    Pose 3-4 questions précises pour l'aider à affiner cette émotion pour une composition musicale.
+    Les questions doivent guider vers une nuance plus spécifique, des couleurs, des contextes ou des contrastes.
+    Exemple de question: "Est-ce une joie explosive ou une joie intérieure et sereine ?"
     """
-    try:
-        response = gemini_model.generate_content(prompt)
-        return response.text.strip()
-    except Exception as e:
-        st.error(f"Erreur lors de la génération de la directive stratégique : {e}")
-        return "Désolé, l'Oracle ne peut pas formuler de directive pour le moment."
+    return _generate_content(_creative_model, prompt, temperature=0.7, max_output_tokens=300)
 
-# --- Fonction pour analyser la directive et extraire les paramètres de récit ---
-def parse_strategic_directive_for_narrative_params(directive_text):
+# --- Fonctionnalités Avancées (Plan Final Ω) ---
+
+def generate_complex_harmonic_structure(genre_musical: str, mood_principal: str, instrumentation: str, tonalite: str = "N/A") -> str:
+    """Génère une structure harmonique complexe (voicings, modulations, contre-mélodies)."""
+    
+    moods_df = get_dataframe_from_sheet("MOODS_ET_EMOTIONS")
+    mood_desc = moods_df[moods_df['ID_Mood'] == mood_principal]['Description_Nuance'].iloc[0] if not moods_df[moods_df['ID_Mood'] == mood_principal].empty else mood_principal
+
+    prompt = f"""En tant que théoricien musical et compositeur IA, génère une structure harmonique complexe pour un morceau de genre **{genre_musical}**.
+    Le mood visé est **{mood_principal} ({mood_desc})**.
+    L'instrumentation principale est : **{instrumentation}**.
+    Si applicable, la tonalité de base est : **{tonalite}**.
+
+    Décris la progression d'accords en notation standard (ex: Cm9 - F7b9 - Bbmaj7).
+    Suggère des voicings spécifiques pour les instruments clés.
+    Propose des idées de modulations ou de cadences étendues.
+    Suggère une idée de contre-mélodie harmonique ou de ligne de basse non triviale.
+    Présente le tout de manière structurée et explicative."""
+    return _generate_content(_creative_model, prompt, temperature=0.9, max_output_tokens=1500)
+
+def copilot_creative_suggestion(current_input: str, context: str, type_suggestion: str = "suite_lyrique") -> str:
     """
-    Analyse le texte d'une directive stratégique pour en extraire des paramètres narratifs structurés.
+    Agit comme un co-pilote créatif, suggérant la suite (lyrique, mélodique, harmonique)
+    basée sur un input courant et un contexte.
+    Args:
+        current_input (str): Le texte, la mélodie (décrite), ou l'accord tapé par le Gardien.
+        context (str): Contexte du morceau (genre, thème, mood, etc.).
+        type_suggestion (str): 'suite_lyrique', 'ligne_basse', 'contre_melodie', 'prochain_accord', 'idée_rythmique'.
     """
-    prompt = f"""Vous êtes un interprète stratégique. Analysez la directive stratégique suivante et extrayez-en les paramètres narratifs clés.
-    Retournez les paramètres au format JSON. Si un paramètre n'est pas explicitement mentionné ou déductible, utilisez une valeur générique ou vide.
+    if type_suggestion == "suite_lyrique":
+        prompt = f"""En tant que co-pilote parolier, le Gardien a commencé à écrire : "{current_input}".
+        Le contexte du morceau est : {context}.
+        Suggère la prochaine ligne ou le prochain couplet (2-4 lignes) pour continuer ce texte de manière fluide et pertinente."""
+    elif type_suggestion == "ligne_basse":
+        prompt = f"""En tant que co-pilote bassiste, le Gardien a établi un groove avec ces éléments : "{current_input}".
+        Le contexte du morceau est : {context} (genre, tempo, mood).
+        Suggère une idée de ligne de basse pour les 4 prochaines mesures, en notation simplifiée (ex: 'Do-Mi-Sol-Do en noires')."""
+    elif type_suggestion == "prochain_accord":
+        prompt = f"""En tant que co-pilote harmonicien, le Gardien a joué l'accord : "{current_input}".
+        Le contexte du morceau est : {context} (genre, tonalité, mood).
+        Suggère 3 options pour le prochain accord, avec une brève justification harmonique pour chaque."""
+    # Ajoutez d'autres types de suggestions au besoin
+    else:
+        return "Type de suggestion non pris en charge."
+    
+    return _generate_content(_creative_model, prompt, temperature=0.9, max_output_tokens=300)
 
-    Clés JSON attendues :
-    - "theme": Thème principal (string, ex: "cyberpunk", "fantasy sombre")
-    - "mood": Ambiance/Ton (string, ex: "sensuel", "mystérieux")
-    - "protagonist_type": Type de protagoniste (string, ex: "humain", "cyborg", "elfe")
-    - "setting": Cadre de l'histoire (string, ex: "futuriste", "médiéval", "post-apocalyptique")
-    - "spiciness": Niveau de sensualité (string, "doux", "modéré", "explicite")
-    - "tropes": Liste de tropes/fétiches (liste de strings, ex: ["amour interdit", "implants cybernétiques"])
-    - "objective_text_generation": (booléen) True si la directive vise principalement une nouvelle génération de texte standalone.
-    - "objective_text_generation_suite": (booléen) True si la directive vise principalement la génération d'une suite.
-
-    Directive Stratégique :
-    {directive_text}
-
-    Exemple de format de sortie JSON:
-    {{
-      "theme": "romance cyberpunk",
-      "mood": "passionné",
-      "protagonist_type": "cyborg",
-      "setting": "Neo-Tokyo",
-      "spiciness": "explicite",
-      "tropes": ["amour interdit", "implants cybernétiques"],
-      "objective_text_generation": true,
-      "objective_text_generation_suite": false
-    }}
+def analyze_and_suggest_personal_style(user_feedback_history_df: pd.DataFrame) -> str:
     """
-    try:
-        response = gemini_model.generate_content(prompt)
-        json_str = response.text.strip()
-        start_idx = json_str.find('{')
-        end_idx = json_str.rfind('}')
-        if start_idx != -1 and end_idx != -1:
-            json_str = json_str[start_idx : end_idx + 1]
-        
-        params = json.loads(json_str)
-        params['objective_text_generation'] = params.get('objective_text_generation', False)
-        params['objective_text_generation_suite'] = params.get('objective_text_generation_suite', False)
-        if not params['objective_text_generation'] and not params['objective_text_generation_suite']:
-            params['objective_text_generation'] = True # Par défaut si l'IA ne précise pas
-        return params
-    except Exception as e:
-        st.error(f"Erreur lors de l'extraction des paramètres narratifs : {e}. Réponse brute : {response.text}")
-        return {
-            "theme": "", "mood": "", "protagonist_type": "", "setting": "", "spiciness": "", "tropes": [],
-            "objective_text_generation": False, "objective_text_generation_suite": False
-        }
+    Analyse l'historique de feedback de l'utilisateur pour suggérer des préférences de style.
+    C'est l'implémentation de l'Agent de Style Dynamique.
+    """
+    if user_feedback_history_df.empty:
+        return "Pas assez de données pour analyser votre style. Veuillez évaluer plus de générations."
+
+    # Pour une analyse simple, on peut compter les tags positifs les plus fréquents
+    positive_feedback_df = user_feedback_history_df[user_feedback_history_df['Evaluation_Manuelle'].astype(str).isin(['4', '5'])]
+    
+    if positive_feedback_df.empty:
+        return "Vos évaluations positives ne contiennent pas encore assez de tags pour analyser votre style. Continuez à donner du feedback !"
+
+    all_tags = []
+    for tags_str in positive_feedback_df['Tags_Feedback'].dropna():
+        all_tags.extend([tag.strip().lower() for tag in tags_str.split(',') if tag.strip()])
+    
+    if not all_tags:
+        return "Pas assez de tags de feedback positifs pour analyser votre style."
+
+    from collections import Counter
+    tag_counts = Counter(all_tags)
+    
+    most_common_tags = tag_counts.most_common(5) # Top 5 des tags les plus fréquents
+
+    prompt = f"""En tant que votre Agent de Style personnel, j'ai analysé vos préférences de création basées sur vos évaluations positives.
+    Voici les tendances principales de votre style : {', '.join([f'{tag} ({count} fois)' for tag, count in most_common_tags])}.
+    
+    Sur la base de cette analyse, je vous suggère de créer un morceau qui combine les éléments suivants :
+    - Genre principal : [Suggérer un genre basé sur les tags, ou une fusion inattendue mais pertinente]
+    - Mood : [Suggérer un mood]
+    - Thème : [Suggérer un thème]
+    - Instrumentation : [Suggérer 2-3 instruments]
+    - Une particularité : [Suggérer un effet ou une structure créative]
+    
+    Ceci est une suggestion personnalisée pour votre prochaine exploration créative !
+    """
+    # L'IA remplira les crochets [] en se basant sur la compréhension des tags et des données existantes
+    return _generate_content(_creative_model, prompt, temperature=0.9, max_output_tokens=500)
+
+
+def generate_multimodal_content_prompts(
+    main_theme: str, main_genre: str, main_mood: str,
+    longueur_morceau: str, artiste_ia_name: str
+) -> dict:
+    """
+    Génère des prompts cohérents pour paroles

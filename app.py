@@ -146,7 +146,9 @@ def _get_options_for_selectbox(df: pd.DataFrame, id_col: str, name_col: str) -> 
     """Génère une liste d'options formatées pour les selectbox à partir d'un DataFrame."""
     if df.empty:
         return ['']
-    return [''] + df.apply(lambda row: f"{row[id_col]} - {row[name_col]}", axis=1).tolist()
+    # Assurez-vous que name_col existe, sinon utilisez id_col pour le display
+    display_name_col = name_col if name_col in df.columns else id_col
+    return [''] + df.apply(lambda row: f"{row[id_col]} - {row[display_name_col]}", axis=1).tolist()
 
 def _get_id_from_display_string(display_string: str) -> str:
     """Extrait l'ID d'une chaîne de format 'ID - Nom'."""
@@ -166,66 +168,70 @@ def _render_add_tab(sheet_name_key: str, fields_config: dict, add_function, form
     with st.form(form_key):
         new_data = {}
         for col_name, config in fields_config.items():
+            # Skip file upload configs here, they are handled separately
+            if col_name.startswith('file_upload_'):
+                continue
+
             label = config.get('label', col_name)
             input_type = config.get('type', 'text_input')
             default_value = config.get('default', '')
             options = config.get('options', [])
-            required = config.get('required', False)
+            required = config.get('required', False) # Keep required for internal validation if needed
 
             if input_type == 'text_input':
                 new_data[col_name] = st.text_input(label, value=default_value, key=f"{form_key}_{col_name}")
             elif input_type == 'text_area':
                 new_data[col_name] = st.text_area(label, value=default_value, key=f"{form_key}_{col_name}", height=config.get('height', None))
             elif input_type == 'selectbox':
-                # Ensure options are properly set from sc.get_all_x
                 if callable(options): # If options is a function (e.g., sc.get_all_styles_musicaux)
                     resolved_options_df = options()
-                    # Determine ID and Name columns from the sheet name for selectbox display
-                    id_col_for_select = WORKSHEET_NAMES[sheet_name_key].replace('_GENERES', '').replace('_PLANETAIRES', '').replace('S_ORACLE', '').replace('S_COSMIQUES', '').replace('S_GALACTIQUES', '').replace('S_UNIVERS', '').replace('MES_CONSTELLES', '').replace('S_ORBITALES_SIMULEES', '').replace('S_STRATEGIQUES_ORACLE', '').replace('S_ORCHESTRAUX', '').replace('S_SONG_UNIVERSELLES', '').replace('S_ET_STYLES_VOCAUX', '').replace('S_DE_GENERATION_ORACLE', '').replace('S_ET_EMOTIONS', '').replace('S_SONORES_DETAILLES', '').replace('LIC_CIBLE_DEMOGRAPHIQUE', '').replace('S_TYPES_ET_GUIDES', '').replace('S_EN_COURS', '').replace('S_IA_REFERENCEMENT', '').replace('LINE_EVENEMENTS_CULTURELS', '').replace('S_EXISTANTES', '').replace('QUE_GENERATIONS', '') + '_ID'
-                    name_col_for_select = WORKSHEET_NAMES[sheet_name_key].replace('_GENERES', '').replace('_PLANETAIRES', '').replace('S_ORACLE', '').replace('S_COSMIQUES', '').replace('S_GALACTIQUES', '').replace('S_UNIVERS', '').replace('MES_CONSTELLES', '').replace('S_ORBITALES_SIMULEES', '').replace('S_STRATEGIQUES_ORACLE', '').replace('S_ORCHESTRAUX', '').replace('S_SONG_UNIVERSELLES', '').replace('S_ET_STYLES_VOCAUX', '').replace('S_DE_GENERATION_ORACLE', '').replace('S_ET_EMOTIONS', '').replace('S_SONORES_DETAILLES', '').replace('LIC_CIBLE_DEMOGRAPHIQUE', '').replace('S_TYPES_ET_GUIDES', '').replace('S_EN_COURS', '').replace('S_IA_REFERENCEMENT', '').replace('LINE_EVENEMENTS_CULTURELS', '').replace('S_EXISTANTES', '').replace('QUE_GENERATIONS', '') + '_Nom'
-
-                    # Default fallback for ID/Name columns if naming convention is not strict
-                    if 'ID' in col_name:
-                        id_col_for_select = col_name
-                        name_col_for_select = col_name.replace('ID_', 'Nom_').replace('_Principal', '').replace('_Associe', '') # Heuristic for name
-                    elif 'Genre' in col_name:
+                    # Determine ID and Name columns for display in selectbox
+                    id_col_for_select = config.get('id_col_for_options', col_name) # Default to col_name
+                    name_col_for_select = config.get('name_col_for_options', col_name) # Default to col_name
+                    
+                    # Heuristics for common cases
+                    if 'ID_Style_Musical' in col_name or 'Genre' in col_name:
                         id_col_for_select = 'ID_Style_Musical'
                         name_col_for_select = 'Nom_Style_Musical'
-                    elif 'Mood' in col_name:
+                    elif 'ID_Mood' in col_name or 'Mood' in col_name:
                         id_col_for_select = 'ID_Mood'
                         name_col_for_select = 'Nom_Mood'
-                    elif 'Theme' in col_name:
+                    elif 'ID_Theme' in col_name or 'Theme' in col_name:
                         id_col_for_select = 'ID_Theme'
                         name_col_for_select = 'Nom_Theme'
-                    elif 'Artiste_IA' in col_name:
+                    elif 'ID_Artiste_IA' in col_name or 'Artiste_IA' in col_name:
                         id_col_for_select = 'ID_Artiste_IA'
                         name_col_for_select = 'Nom_Artiste_IA'
-                    elif 'Album' in col_name:
+                    elif 'ID_Album' in col_name or 'Album' in col_name:
                         id_col_for_select = 'ID_Album'
                         name_col_for_select = 'Nom_Album'
-                    elif 'Style_Lyrique' in col_name:
+                    elif 'ID_Style_Lyrique' in col_name or 'Style_Lyrique' in col_name:
                         id_col_for_select = 'ID_Style_Lyrique'
                         name_col_for_select = 'Nom_Style_Lyrique'
-                    elif 'Structure_Chanson' in col_name:
+                    elif 'ID_Structure' in col_name or 'Structure_Chanson' in col_name:
                         id_col_for_select = 'ID_Structure'
                         name_col_for_select = 'Nom_Structure'
                     elif 'Type_Voix_Desiree' in col_name or 'Type_Vocal_General' in col_name:
                         id_col_for_select = 'ID_Vocal'
-                        name_col_for_select = 'Type_Vocal_General'
+                        name_col_for_select = 'Type_Vocal_General' # This is the actual name column for VOIX_ET_STYLES_VOCAUX
                     elif 'Public_Cible' in col_name:
                         id_col_for_select = 'ID_Public'
                         name_col_for_select = 'Nom_Public'
+                    elif 'Type_Evenement' in col_name:
+                        id_col_for_select = 'Type_Evenement' # No specific ID column, use name
+                        name_col_for_select = 'Type_Evenement'
 
-                    available_options = _get_options_for_selectbox(resolved_options_df, id_col_for_select, name_col_for_select if name_col_for_select in resolved_options_df.columns else id_col_for_select)
-                    new_data[col_name] = _get_id_from_display_string(st.selectbox(label, available_options, key=f"{form_key}_{col_name}"))
+                    available_options = _get_options_for_selectbox(resolved_options_df, id_col_for_select, name_col_for_select)
+                    selected_display_value = st.selectbox(label, available_options, key=f"{form_key}_{col_name}")
+                    new_data[col_name] = _get_id_from_display_string(selected_display_value)
                 else: # Static options list
                     new_data[col_name] = st.selectbox(label, options, key=f"{form_key}_{col_name}")
             elif input_type == 'multiselect':
-                # For multiselect, default needs to be a list
                 current_values = config.get('current_value', [])
                 if callable(options):
                     resolved_options_df = options()
-                    select_options = resolved_options_df[config.get('id_col_for_options')].tolist() if not resolved_options_df.empty else []
+                    select_options_id_col = config.get('id_col_for_options', 'ID') # Default ID col for multiselect options
+                    select_options = resolved_options_df[select_options_id_col].tolist() if not resolved_options_df.empty and select_options_id_col in resolved_options_df.columns else []
                     new_data[col_name] = st.multiselect(label, select_options, default=current_values, key=f"{form_key}_{col_name}")
                 else:
                     new_data[col_name] = st.multiselect(label, options, default=current_values, key=f"{form_key}_{col_name}")
@@ -249,9 +255,11 @@ def _render_add_tab(sheet_name_key: str, fields_config: dict, add_function, form
         submit_button = st.form_submit_button("Ajouter")
 
         if submit_button:
-            # Basic validation for required fields
+            # Manual validation for required fields, now that 'required=True' is removed from widgets
             all_required_filled = True
             for col_name, config in fields_config.items():
+                if col_name.startswith('file_upload_'): # Skip file upload configs
+                    continue
                 if config.get('required', False) and (not new_data.get(col_name) or new_data.get(col_name) == ''):
                     st.error(f"Le champ '{config['label']}' est obligatoire.")
                     all_required_filled = False
@@ -321,6 +329,10 @@ def _render_update_delete_tab(sheet_name_key: str, unique_id_col: str, display_c
         with st.form(form_key):
             updated_data = {}
             for col_name, config in fields_config.items():
+                # Skip file path configs here, they are handled separately
+                if col_name.startswith('file_path_'):
+                    continue
+
                 label = config.get('label', col_name)
                 input_type = config.get('type', 'text_input')
                 current_value = selected_row.get(col_name, config.get('default', ''))
@@ -333,9 +345,10 @@ def _render_update_delete_tab(sheet_name_key: str, unique_id_col: str, display_c
                 elif input_type == 'selectbox':
                     if callable(options):
                         resolved_options_df = options()
-                        # Dynamic ID and Name columns for selectbox from the sheet name
-                        id_col_for_select = unique_id_col
-                        name_col_for_select = display_col
+                        id_col_for_select = config.get('id_col_for_options', col_name)
+                        name_col_for_select = config.get('name_col_for_options', col_name)
+                        
+                        # Heuristics for common cases
                         if 'ID_Style_Musical' in col_name or 'Genre' in col_name:
                             id_col_for_select = 'ID_Style_Musical'
                             name_col_for_select = 'Nom_Style_Musical'
@@ -360,22 +373,39 @@ def _render_update_delete_tab(sheet_name_key: str, unique_id_col: str, display_c
                         elif 'Type_Voix_Desiree' in col_name or 'Type_Vocal_General' in col_name:
                             id_col_for_select = 'ID_Vocal'
                             name_col_for_select = 'Type_Vocal_General'
-                        elif 'ID_Public' in col_name or 'Public_Cible' in col_name:
+                        elif 'Public_Cible' in col_name:
                             id_col_for_select = 'ID_Public'
                             name_col_for_select = 'Nom_Public'
                         elif 'Type_Evenement' in col_name:
-                             id_col_for_select = 'Type_Evenement' # No specific ID column, use name
-                             name_col_for_select = 'Type_Evenement'
+                            id_col_for_select = 'Type_Evenement'
+                            name_col_for_select = 'Type_Evenement'
 
-                        available_options = _get_options_for_selectbox(resolved_options_df, id_col_for_select, name_col_for_select if name_col_for_select in resolved_options_df.columns else id_col_for_select)
-                        # Find the index of the current value in the options list
-                        try:
-                            default_index = available_options.index(f"{current_value} - {current_value}") if current_value in resolved_options_df[id_col_for_select].tolist() else 0
-                        except ValueError:
-                            default_index = 0 # Fallback if current_value is not found or is empty
+                        available_options_display = _get_options_for_selectbox(resolved_options_df, id_col_for_select, name_col_for_select)
                         
-                        updated_data[col_name] = _get_id_from_display_string(st.selectbox(label, available_options, index=default_index, key=f"{form_key}_{col_name}"))
-                    else:
+                        # Find the index of the current value. Handle cases where current_value might be empty or not found.
+                        default_index = 0
+                        if current_value:
+                            try:
+                                # Try to match exact ID-Name format first
+                                if f"{current_value} - {current_value}" in available_options_display:
+                                     default_index = available_options_display.index(f"{current_value} - {current_value}")
+                                elif f"{current_value} - {current_value}" in resolved_options_df[id_col_for_select].tolist():
+                                     # If the actual data source doesn't have a distinct name column,
+                                     # but the ID is there, use it to find the index.
+                                     default_index = available_options_display.index(f"{current_value} - {current_value}")
+                                else: # Fallback if current_value is just the name and not an ID
+                                    matching_rows = resolved_options_df[resolved_options_df[name_col_for_select] == current_value]
+                                    if not matching_rows.empty:
+                                        matched_id = matching_rows[id_col_for_select].iloc[0]
+                                        default_index = available_options_display.index(f"{matched_id} - {current_value}")
+
+                            except ValueError:
+                                default_index = 0 # Fallback if value not found
+
+                        selected_display_value = st.selectbox(label, available_options_display, index=default_index, key=f"{form_key}_{col_name}")
+                        updated_data[col_name] = _get_id_from_display_string(selected_display_value)
+
+                    else: # Static options list
                         try:
                             default_index = options.index(current_value) if current_value in options else 0
                         except ValueError:
@@ -383,24 +413,22 @@ def _render_update_delete_tab(sheet_name_key: str, unique_id_col: str, display_c
                         updated_data[col_name] = st.selectbox(label, options, index=default_index, key=f"{form_key}_{col_name}")
 
                 elif input_type == 'multiselect':
-                    # Convert comma-separated string to list for multiselect default
                     current_values_list = [v.strip() for v in str(current_value).split(',')] if current_value else []
                     if callable(options):
                         resolved_options_df = options()
-                        select_options = resolved_options_df[config.get('id_col_for_options')].tolist() if not resolved_options_df.empty else []
+                        select_options_id_col = config.get('id_col_for_options', 'ID') # Default ID col for multiselect options
+                        select_options = resolved_options_df[select_options_id_col].tolist() if not resolved_options_df.empty and select_options_id_col in resolved_options_df.columns else []
                         updated_data[col_name] = st.multiselect(label, select_options, default=current_values_list, key=f"{form_key}_{col_name}")
                     else:
                         updated_data[col_name] = st.multiselect(label, options, default=current_values_list, key=f"{form_key}_{col_name}")
                     updated_data[col_name] = ', '.join(updated_data[col_name]) # Store as comma-separated string
                 elif input_type == 'date_input':
-                    # Convert string date to datetime object for date_input
                     try:
                         date_value = pd.to_datetime(current_value).date() if current_value else datetime.now().date()
                     except Exception:
                         date_value = datetime.now().date()
                     updated_data[col_name] = st.date_input(label, value=date_value, key=f"{form_key}_{col_name}")
                 elif input_type == 'number_input':
-                    # Ensure numeric conversion for default value
                     try:
                         num_value = float(current_value) if current_value else config.get('default', 0.0)
                     except ValueError:
@@ -412,34 +440,38 @@ def _render_update_delete_tab(sheet_name_key: str, unique_id_col: str, display_c
 
             # Display existing local files and allow new uploads for update
             if 'file_path_audio' in fields_config:
-                if selected_row.get(fields_config['file_path_audio']['col_name']) and os.path.exists(os.path.join(AUDIO_CLIPS_DIR, selected_row[fields_config['file_path_audio']['col_name']])):
+                audio_col_name = fields_config['file_path_audio']['col_name']
+                if selected_row.get(audio_col_name) and os.path.exists(os.path.join(AUDIO_CLIPS_DIR, selected_row[audio_col_name])):
                     st.markdown("##### Fichier Audio Actuel")
-                    st.audio(os.path.join(AUDIO_CLIPS_DIR, selected_row[fields_config['file_path_audio']['col_name']]), format="audio/mp3")
+                    st.audio(os.path.join(AUDIO_CLIPS_DIR, selected_row[audio_col_name]), format="audio/mp3")
                 uploaded_audio_file = st.file_uploader(fields_config['file_path_audio']['label'], type=fields_config['file_path_audio']['type'], key=f"{form_key}_audio_file_upd")
                 if uploaded_audio_file:
                     new_audio_path = ut.save_uploaded_file(uploaded_audio_file, AUDIO_CLIPS_DIR)
                     if new_audio_path:
-                        updated_data[fields_config['file_path_audio']['col_name']] = new_audio_path
+                        updated_data[audio_col_name] = new_audio_path
             
             if 'file_path_cover' in fields_config:
-                if selected_row.get(fields_config['file_path_cover']['col_name']) and os.path.exists(os.path.join(SONG_COVERS_DIR if sheet_name_key == "MORCEAUX_GENERES" else ALBUM_COVERS_DIR, selected_row[fields_config['file_path_cover']['col_name']])):
+                cover_col_name = fields_config['file_path_cover']['col_name']
+                target_dir_cover = SONG_COVERS_DIR if sheet_name_key == "MORCEAUX_GENERES" else ALBUM_COVERS_DIR
+                if selected_row.get(cover_col_name) and os.path.exists(os.path.join(target_dir_cover, selected_row[cover_col_name])):
                     st.markdown("##### Image de Cover Actuelle")
-                    st.image(os.path.join(SONG_COVERS_DIR if sheet_name_key == "MORCEAUX_GENERES" else ALBUM_COVERS_DIR, selected_row[fields_config['file_path_cover']['col_name']]), width=150)
+                    st.image(os.path.join(target_dir_cover, selected_row[cover_col_name]), width=150)
                 uploaded_cover_file = st.file_uploader(fields_config['file_path_cover']['label'], type=fields_config['file_path_cover']['type'], key=f"{form_key}_cover_file_upd")
                 if uploaded_cover_file:
-                    new_cover_path = ut.save_uploaded_file(uploaded_cover_file, SONG_COVERS_DIR if sheet_name_key == "MORCEAUX_GENERES" else ALBUM_COVERS_DIR)
+                    new_cover_path = ut.save_uploaded_file(uploaded_cover_file, target_dir_cover)
                     if new_cover_path:
-                        updated_data[fields_config['file_path_cover']['col_name']] = new_cover_path
+                        updated_data[cover_col_name] = new_cover_path
 
             if 'file_path_profile_img' in fields_config:
-                if selected_row.get(fields_config['file_path_profile_img']['col_name']) and os.path.exists(os.path.join(ALBUM_COVERS_DIR, selected_row[fields_config['file_path_profile_img']['col_name']])):
+                profile_img_col_name = fields_config['file_path_profile_img']['col_name']
+                if selected_row.get(profile_img_col_name) and os.path.exists(os.path.join(ALBUM_COVERS_DIR, selected_row[profile_img_col_name])):
                     st.markdown("##### Image de Profil Actuelle")
-                    st.image(os.path.join(ALBUM_COVERS_DIR, selected_row[fields_config['file_path_profile_img']['col_name']]), width=100)
+                    st.image(os.path.join(ALBUM_COVERS_DIR, selected_row[profile_img_col_name]), width=100)
                 uploaded_profile_img = st.file_uploader(fields_config['file_path_profile_img']['label'], type=fields_config['file_path_profile_img']['type'], key=f"{form_key}_profile_img_upd")
                 if uploaded_profile_img:
                     new_profile_img_path = ut.save_uploaded_file(uploaded_profile_img, ALBUM_COVERS_DIR)
                     if new_profile_img_path:
-                        updated_data[fields_config['file_path_profile_img']['col_name']] = new_profile_img_path
+                        updated_data[profile_img_col_name] = new_profile_img_path
             
             col_form_buttons = st.columns(2)
             with col_form_buttons[0]:
@@ -448,9 +480,11 @@ def _render_update_delete_tab(sheet_name_key: str, unique_id_col: str, display_c
                 submit_delete_trigger_button = st.form_submit_button("Supprimer", help="Cliquez pour lancer la confirmation de suppression.")
 
             if submit_update_button:
-                # Basic validation for required fields
+                # Manual validation for required fields
                 all_required_filled = True
                 for col_name, config in fields_config.items():
+                    if col_name.startswith('file_path_'):
+                        continue
                     if config.get('required', False) and (not updated_data.get(col_name) or updated_data.get(col_name) == ''):
                         st.error(f"Le champ '{config['label']}' est obligatoire.")
                         all_required_filled = False
@@ -538,13 +572,14 @@ def render_content_generator_page():
         with st.form("lyrics_generator_form"):
             col1, col2 = st.columns(2)
             with col1:
-                st.selectbox("Genre Musical", [''] + genres_musicaux, key="lyrics_genre_musical", required=True)
-                st.selectbox("Mood Principal", [''] + moods, key="lyrics_mood_principal", required=True)
-                st.selectbox("Thème Principal Lyrique", [''] + themes, key="lyrics_theme_lyrique_principal", required=True)
-                st.selectbox("Style Lyrique", [''] + styles_lyriques, key="lyrics_style_lyrique", required=True)
+                # Removed 'required=True' to prevent the original error
+                st.selectbox("Genre Musical", [''] + genres_musicaux, key="lyrics_genre_musical")
+                st.selectbox("Mood Principal", [''] + moods, key="lyrics_mood_principal")
+                st.selectbox("Thème Principal Lyrique", [''] + themes, key="lyrics_theme_lyrique_principal")
+                st.selectbox("Style Lyrique", [''] + styles_lyriques, key="lyrics_style_lyrique")
                 st.text_input("Mots-clés de Génération (séparés par des virgules)", key="lyrics_mots_cles_generation")
             with col2:
-                st.selectbox("Structure de Chanson", [''] + structures_song, key="lyrics_structure_chanson", required=True)
+                st.selectbox("Structure de Chanson", [''] + structures_song, key="lyrics_structure_chanson")
                 st.selectbox("Langue des Paroles", ["", "Français", "Anglais", "Espagnol"], key="lyrics_langue_paroles")
                 st.selectbox("Niveau de Langage", ["", "Familier", "Courant", "Soutenu", "Poétique", "Argotique", "Technique"], key="lyrics_niveau_langage_paroles")
                 st.selectbox("Imagerie Texte", ["", "Forte et Descriptive", "Métaphorique", "Abstraite", "Concrète"], key="lyrics_imagerie_texte")
@@ -565,9 +600,23 @@ def render_content_generator_page():
 
 
         if submit_lyrics_button:
-            if all([st.session_state.lyrics_genre_musical, st.session_state.lyrics_mood_principal,
-                    st.session_state.lyrics_theme_lyrique_principal, st.session_state.lyrics_style_lyrique,
-                    st.session_state.lyrics_structure_chanson]):
+            # Manual validation after form submission
+            required_lyrics_fields = {
+                "lyrics_genre_musical": "Genre Musical",
+                "lyrics_mood_principal": "Mood Principal",
+                "lyrics_theme_lyrique_principal": "Thème Principal Lyrique",
+                "lyrics_style_lyrique": "Style Lyrique",
+                "lyrics_structure_chanson": "Structure de Chanson"
+            }
+            
+            all_lyrics_fields_filled = True
+            for field_key, field_name in required_lyrics_fields.items():
+                if not st.session_state.get(field_key):
+                    st.warning(f"Veuillez remplir le champ obligatoire : {field_name}.")
+                    all_lyrics_fields_filled = False
+                    break
+
+            if all_lyrics_fields_filled:
                 with st.spinner("L'Oracle compose les paroles..."):
                     generated_lyrics = go.generate_song_lyrics(
                         genre_musical=st.session_state.lyrics_genre_musical,
@@ -582,8 +631,7 @@ def render_content_generator_page():
                     )
                     st.session_state['generated_lyrics'] = generated_lyrics
                     st.success("Paroles générées avec succès !")
-            else:
-                st.warning("Veuillez remplir tous les champs obligatoires pour générer les paroles.")
+            # else: validation message is handled by the loop above
 
         if 'generated_lyrics' in st.session_state and st.session_state.generated_lyrics:
             st.markdown("---")
@@ -601,7 +649,8 @@ def render_content_generator_page():
                     st.info("Ces paroles seront ajoutées à un nouveau morceau dans l'onglet `MORCEAUX_GENERES`.")
                     artistes_ia_list = [''] + sc.get_all_artistes_ia()['ID_Artiste_IA'].tolist()
                     new_morceau_title = st.text_input("Titre du nouveau morceau", value=f"Nouveau Morceau - {st.session_state.lyrics_genre_musical}", key="new_morceau_lyrics_title")
-                    new_morceau_artist_ia = st.selectbox("Artiste IA Associé", artistes_ia_list, key="new_morceau_lyrics_artist_ia", required=True)
+                    # Removed 'required=True'
+                    new_morceau_artist_ia = st.selectbox("Artiste IA Associé", artistes_ia_list, key="new_morceau_lyrics_artist_ia")
                     
                     save_button = st.form_submit_button("Sauvegarder le nouveau Morceau")
                     if save_button:
@@ -687,8 +736,9 @@ def render_content_generator_page():
         with st.form("audio_prompt_generator_form"):
             col1, col2 = st.columns(2)
             with col1:
-                st.selectbox("Genre Musical", [''] + styles_musicaux, key="audio_genre_musical_input", required=True)
-                st.selectbox("Mood Principal", [''] + moods, key="audio_mood_principal_input", required=True)
+                # Removed 'required=True'
+                st.selectbox("Genre Musical", [''] + styles_musicaux, key="audio_genre_musical_input")
+                st.selectbox("Mood Principal", [''] + moods, key="audio_mood_principal_input")
                 st.text_input("Durée Estimée (ex: 03:30)", key="audio_duree_estimee_input")
                 st.text_input("Instrumentation Principale (ex: Piano, Violoncelle, Pads)", key="audio_instrumentation_principale_input")
             with col2:
@@ -702,6 +752,7 @@ def render_content_generator_page():
             submit_audio_prompt_button = st.form_submit_button("Générer le Prompt Audio")
 
         if submit_audio_prompt_button:
+            # Manual validation
             if st.session_state.audio_genre_musical_input and st.session_state.audio_mood_principal_input:
                 with st.spinner("L'Oracle génère le prompt audio..."):
                     generated_audio_prompt = go.generate_audio_prompt(
@@ -748,7 +799,7 @@ def render_content_generator_page():
                         else:
                             st.error("Échec de la mise à jour du prompt audio.")
                     else:
-                        st.warning("Veuillez sélectionner un morceau pour lier le prompt audio.")
+                        st.warning("Veuillez sélectionner un morceau à mettre à jour.")
             else:
                 st.info("Aucun morceau existant pour lier le prompt audio.")
 
@@ -761,12 +812,14 @@ def render_content_generator_page():
         genres_list = sc.get_all_styles_musicaux()['ID_Style_Musical'].tolist()
 
         with st.form("title_generator_form"):
-            st.selectbox("Thème Principal", [''] + themes_list, key="title_theme_principal", required=True)
-            st.selectbox("Genre Musical", [''] + genres_list, key="title_genre_musical", required=True)
+            # Removed 'required=True'
+            st.selectbox("Thème Principal", [''] + themes_list, key="title_theme_principal")
+            st.selectbox("Genre Musical", [''] + genres_list, key="title_genre_musical")
             st.text_area("Extrait de paroles (optionnel, pour inspiration)", key="title_paroles_extrait")
             submit_title_button = st.form_submit_button("Générer les Titres")
 
         if submit_title_button:
+            # Manual validation
             if st.session_state.title_theme_principal and st.session_state.title_genre_musical:
                 with st.spinner("L'Oracle brainstorme des titres..."):
                     generated_titles = go.generate_title_ideas(
@@ -796,18 +849,32 @@ def render_content_generator_page():
         with st.form("marketing_copy_form"):
             col1, col2 = st.columns(2)
             with col1:
-                st.text_input("Titre du Morceau/Album", key="marketing_titre_morceau", required=True)
-                st.selectbox("Genre Musical", [''] + styles_musicaux_list, key="marketing_genre_musical", required=True)
+                st.text_input("Titre du Morceau/Album", key="marketing_titre_morceau") # Removed 'required=True'
+                st.selectbox("Genre Musical", [''] + styles_musicaux_list, key="marketing_genre_musical") # Removed 'required=True'
             with col2:
-                st.selectbox("Mood Principal", [''] + moods_list, key="marketing_mood_principal", required=True)
-                st.selectbox("Public Cible", [''] + public_cible_list, key="marketing_public_cible", required=True)
-            st.text_input("Point Fort Principal (ex: 'son unique', 'message profond')", key="marketing_point_fort", required=True)
+                st.selectbox("Mood Principal", [''] + moods_list, key="marketing_mood_principal") # Removed 'required=True'
+                st.selectbox("Public Cible", [''] + public_cible_list, key="marketing_public_cible") # Removed 'required=True'
+            st.text_input("Point Fort Principal (ex: 'son unique', 'message profond')", key="marketing_point_fort") # Removed 'required=True'
             submit_marketing_button = st.form_submit_button("Générer la Description Marketing")
 
             if submit_marketing_button:
-                if all([st.session_state.marketing_titre_morceau, st.session_state.marketing_genre_musical,
-                        st.session_state.marketing_mood_principal, st.session_state.marketing_public_cible,
-                        st.session_state.marketing_point_fort]):
+                # Manual validation
+                required_marketing_fields = {
+                    "marketing_titre_morceau": "Titre du Morceau/Album",
+                    "marketing_genre_musical": "Genre Musical",
+                    "marketing_mood_principal": "Mood Principal",
+                    "marketing_public_cible": "Public Cible",
+                    "marketing_point_fort": "Point Fort Principal"
+                }
+
+                all_marketing_fields_filled = True
+                for field_key, field_name in required_marketing_fields.items():
+                    if not st.session_state.get(field_key):
+                        st.warning(f"Veuillez remplir le champ obligatoire : {field_name}.")
+                        all_marketing_fields_filled = False
+                        break
+
+                if all_marketing_fields_filled:
                     with st.spinner("L'Oracle rédige la description..."):
                         generated_marketing_copy = go.generate_marketing_copy(
                             titre_morceau=st.session_state.marketing_titre_morceau,
@@ -818,8 +885,7 @@ def render_content_generator_page():
                         )
                         st.session_state['generated_marketing_copy'] = generated_marketing_copy
                         st.success("Description marketing générée avec succès !")
-                else:
-                    st.warning("Veuillez remplir tous les champs pour générer la description marketing.")
+                # else: validation message is handled by the loop above
             
         if 'generated_marketing_copy' in st.session_state and st.session_state.generated_marketing_copy:
             st.markdown("---")
@@ -835,16 +901,30 @@ def render_content_generator_page():
         moods_list = sc.get_all_moods()['ID_Mood'].tolist()
 
         with st.form("album_art_prompt_form"):
-            st.text_input("Nom de l'Album", key="album_art_nom_album", required=True)
-            st.selectbox("Genre Dominant de l'Album", [''] + styles_musicaux_list, key="album_art_genre_dominant", required=True)
-            st.text_area("Description du Concept de l'Album", key="album_art_description_concept", required=True)
-            st.selectbox("Mood Principal Visuel", [''] + moods_list, key="album_art_mood_principal", required=True)
+            st.text_input("Nom de l'Album", key="album_art_nom_album") # Removed 'required=True'
+            st.selectbox("Genre Dominant de l'Album", [''] + styles_musicaux_list, key="album_art_genre_dominant") # Removed 'required=True'
+            st.text_area("Description du Concept de l'Album", key="album_art_description_concept") # Removed 'required=True'
+            st.selectbox("Mood Principal Visuel", [''] + moods_list, key="album_art_mood_principal") # Removed 'required=True'
             st.text_input("Mots-clés Visuels Supplémentaires (ex: 'couleurs vives', 'style néon', 'minimaliste')", key="album_art_mots_cles_visuels")
             submit_album_art_button = st.form_submit_button("Générer le Prompt Visuel")
 
             if submit_album_art_button:
-                if all([st.session_state.album_art_nom_album, st.session_state.album_art_genre_dominant,
-                        st.session_state.album_art_description_concept, st.session_state.album_art_mood_principal]):
+                # Manual validation
+                required_album_art_fields = {
+                    "album_art_nom_album": "Nom de l'Album",
+                    "album_art_genre_dominant": "Genre Dominant de l'Album",
+                    "album_art_description_concept": "Description du Concept de l'Album",
+                    "album_art_mood_principal": "Mood Principal Visuel"
+                }
+
+                all_album_art_fields_filled = True
+                for field_key, field_name in required_album_art_fields.items():
+                    if not st.session_state.get(field_key):
+                        st.warning(f"Veuillez remplir le champ obligatoire : {field_name}.")
+                        all_album_art_fields_filled = False
+                        break
+
+                if all_album_art_fields_filled:
                     with st.spinner("L'Oracle imagine la pochette..."):
                         generated_album_art_prompt = go.generate_album_art_prompt(
                             nom_album=st.session_state.album_art_nom_album,
@@ -855,8 +935,7 @@ def render_content_generator_page():
                         )
                         st.session_state['generated_album_art_prompt'] = generated_album_art_prompt
                         st.success("Prompt de pochette d'album généré avec succès !")
-                else:
-                    st.warning("Veuillez remplir les champs obligatoires pour générer le prompt visuel.")
+                # else: validation message is handled by the loop above
             
         if 'generated_album_art_prompt' in st.session_state and st.session_state.generated_album_art_prompt:
             st.markdown("---")
@@ -881,10 +960,11 @@ def render_copilot_creative_page():
     col_ctx1, col_ctx2 = st.columns(2)
     with col_ctx1:
         st.selectbox("Genre Musical du morceau", [''] + sc.get_all_styles_musicaux()['ID_Style_Musical'].tolist(), key="copilot_genre_musical")
-        st.selectbox("Mood du morceau", [''] + sc.get_all_moods()['ID_Mood'].tolist(), key="copilot_mood_principal")
     with col_ctx2:
-        st.selectbox("Thème Principal du morceau", [''] + sc.get_all_themes()['ID_Theme'].tolist(), key="copilot_theme_principal")
-        st.text_input("Mots-clés contextuels (ex: 'solitude urbaine', 'rythme entraînant')", key="copilot_context_keywords")
+        st.selectbox("Mood du morceau", [''] + sc.get_all_moods()['ID_Mood'].tolist(), key="copilot_mood_principal")
+    
+    st.selectbox("Thème Principal du morceau", [''] + sc.get_all_themes()['ID_Theme'].tolist(), key="copilot_theme_principal")
+    st.text_input("Mots-clés contextuels (ex: 'solitude urbaine', 'rythme entraînant')", key="copilot_context_keywords")
         
     full_context = f"Genre: {st.session_state.copilot_genre_musical}, Mood: {st.session_state.copilot_mood_principal}, Thème: {st.session_state.copilot_theme_principal}, Mots-clés: {st.session_state.copilot_context_keywords}"
 
@@ -898,6 +978,7 @@ def render_copilot_creative_page():
             submit_copilot_lyrics = st.form_submit_button("Suggérer la suite")
 
             if submit_copilot_lyrics:
+                # Manual validation
                 if st.session_state.copilot_current_lyrics_input and st.session_state.copilot_genre_musical and st.session_state.copilot_mood_principal:
                     with st.spinner("L'Oracle brainstorme la suite des paroles..."):
                         suggestion = go.copilot_creative_suggestion(
@@ -926,6 +1007,7 @@ def render_copilot_creative_page():
             submit_copilot_bass = st.form_submit_button("Suggérer une ligne de basse")
 
             if submit_copilot_bass:
+                # Manual validation
                 if st.session_state.copilot_current_bass_input and st.session_state.copilot_genre_musical and st.session_state.copilot_mood_principal:
                     with st.spinner("L'Oracle imagine la ligne de basse..."):
                         suggestion = go.copilot_creative_suggestion(
@@ -952,6 +1034,7 @@ def render_copilot_creative_page():
             submit_copilot_chord = st.form_submit_button("Suggérer le prochain accord")
 
             if submit_copilot_chord:
+                # Manual validation
                 if st.session_state.copilot_current_chord_input and st.session_state.copilot_tonalite_input and st.session_state.copilot_genre_musical and st.session_state.copilot_mood_principal:
                     chord_context = f"Tonalité: {st.session_state.copilot_tonalite_input}, Genre: {st.session_state.copilot_genre_musical}, Mood: {st.session_state.copilot_mood_principal}"
                     with st.spinner("L'Oracle réfléchit aux harmonies..."):
@@ -978,6 +1061,7 @@ def render_copilot_creative_page():
             submit_copilot_rhythm = st.form_submit_button("Suggérer un rythme")
 
             if submit_copilot_rhythm:
+                # Manual validation
                 if st.session_state.copilot_current_rhythm_input and st.session_state.copilot_genre_musical and st.session_state.copilot_mood_principal:
                     rhythm_context = f"Genre: {st.session_state.copilot_genre_musical}, Mood: {st.session_state.copilot_mood_principal}"
                     with st.spinner("L'Oracle imagine un rythme..."):
@@ -1008,20 +1092,34 @@ def render_multimodal_creation_page():
     with st.form("multimodal_creation_form"):
         col_multi1, col_multi2 = st.columns(2)
         with col_multi1:
-            st.selectbox("Thème Principal", [''] + themes_list, key="multi_main_theme", required=True)
-            st.selectbox("Genre Musical Général", [''] + genres_list, key="multi_main_genre", required=True)
+            st.selectbox("Thème Principal", [''] + themes_list, key="multi_main_theme") # Removed 'required=True'
+            st.selectbox("Genre Musical Général", [''] + genres_list, key="multi_main_genre") # Removed 'required=True'
         with col_multi2:
-            st.selectbox("Mood Général", [''] + moods_list, key="multi_main_mood", required=True)
-            st.selectbox("Artiste IA Associé", [''] + artistes_ia_list, key="multi_artiste_ia_name", required=True)
+            st.selectbox("Mood Général", [''] + moods_list, key="multi_main_mood") # Removed 'required=True'
+            st.selectbox("Artiste IA Associé", [''] + artistes_ia_list, key="multi_artiste_ia_name") # Removed 'required=True'
             
-        st.text_input("Longueur Estimée du Morceau (ex: '03:45')", key="multi_longueur_morceau", required=True)
+        st.text_input("Longueur Estimée du Morceau (ex: '03:45')", key="multi_longueur_morceau") # Removed 'required=True'
 
         submit_multimodal_button = st.form_submit_button("Générer les Prompts Multimodaux")
 
         if submit_multimodal_button:
-            if all([st.session_state.multi_main_theme, st.session_state.multi_main_genre,
-                    st.session_state.multi_main_mood, st.session_state.multi_artiste_ia_name,
-                    st.session_state.multi_longueur_morceau]):
+            # Manual validation
+            required_multimodal_fields = {
+                "multi_main_theme": "Thème Principal",
+                "multi_main_genre": "Genre Musical Général",
+                "multi_main_mood": "Mood Général",
+                "multi_artiste_ia_name": "Artiste IA Associé",
+                "multi_longueur_morceau": "Longueur Estimée du Morceau"
+            }
+
+            all_multimodal_fields_filled = True
+            for field_key, field_name in required_multimodal_fields.items():
+                if not st.session_state.get(field_key):
+                    st.warning(f"Veuillez remplir le champ obligatoire : {field_name}.")
+                    all_multimodal_fields_filled = False
+                    break
+
+            if all_multimodal_fields_filled:
                 with st.spinner("L'Oracle orchestre votre création multimodale..."):
                     multimodal_prompts = go.generate_multimodal_content_prompts(
                         main_theme=st.session_state.multi_main_theme,
@@ -1032,8 +1130,7 @@ def render_multimodal_creation_page():
                     )
                     st.session_state['multimodal_prompts'] = multimodal_prompts
                     st.success("Prompts multimodaux générés avec succès !")
-            else:
-                st.warning("Veuillez remplir tous les champs obligatoires pour la création multimodale.")
+                # else: validation message is handled by the loop above
 
     if 'multimodal_prompts' in st.session_state and st.session_state.multimodal_prompts:
         st.markdown("---")
@@ -1090,7 +1187,7 @@ def render_my_tracks_page():
                 'Prompt_Generation_Paroles': {'type': 'text_area', 'label': 'Prompt Génération Paroles', 'height': 150},
                 'Instrumentation_Principale': {'type': 'text_input', 'label': 'Instrumentation Principale'},
                 'Effets_Production_Dominants': {'type': 'text_input', 'label': 'Effets Production Dominants'},
-                'Type_Voix_Desiree': {'type': 'selectbox', 'label': 'Type de Voix Désirée', 'options': sc.get_all_voix_styles},
+                'Type_Voix_Desiree': {'type': 'selectbox', 'label': 'Type de Voix Désirée', 'options': sc.get_all_voix_styles, 'id_col_for_options': 'Type_Vocal_General', 'name_col_for_options': 'Type_Vocal_General'},
                 'Style_Vocal_Desire': {'type': 'text_input', 'label': 'Style Vocal Désiré (ex: Lyrique, Râpeux)'},
                 'Caractere_Voix_Desire': {'type': 'text_input', 'label': 'Caractère Voix Désiré (ex: Puissant, Doux)'},
                 'Mots_Cles_SEO': {'type': 'text_input', 'label': 'Mots-clés SEO'},
@@ -1127,7 +1224,7 @@ def render_my_tracks_page():
                 'Prompt_Generation_Paroles': {'type': 'text_area', 'label': 'Prompt Génération Paroles', 'height': 150},
                 'Instrumentation_Principale': {'type': 'text_input', 'label': 'Instrumentation Principale'},
                 'Effets_Production_Dominants': {'type': 'text_input', 'label': 'Effets Production Dominants'},
-                'Type_Voix_Desiree': {'type': 'selectbox', 'label': 'Type de Voix Désirée', 'options': sc.get_all_voix_styles},
+                'Type_Voix_Desiree': {'type': 'selectbox', 'label': 'Type de Voix Désirée', 'options': sc.get_all_voix_styles, 'id_col_for_options': 'Type_Vocal_General', 'name_col_for_options': 'Type_Vocal_General'},
                 'Style_Vocal_Desire': {'type': 'text_input', 'label': 'Style Vocal Désiré (ex: Lyrique, Râpeux)'},
                 'Caractere_Voix_Desire': {'type': 'text_input', 'label': 'Caractère Voix Désiré (ex: Puissant, Doux)'},
                 'Mots_Cles_SEO': {'type': 'text_input', 'label': 'Mots-clés SEO'},
@@ -1160,17 +1257,17 @@ def render_audio_player_page():
         
         with col_filter_track:
             st.subheader("Filtres")
-            filter_genre = st.selectbox("Filtrer par Genre", ['Tous'] + morceaux_df_player['ID_Style_Musical_Principal'].unique().tolist(), key="player_filter_genre")
-            filter_artist = st.selectbox("Filtrer par Artiste IA", ['Tous'] + morceaux_df_player['ID_Artiste_IA'].unique().tolist(), key="player_filter_artist")
-            filter_status = st.selectbox("Filtrer par Statut", ['Tous'] + morceaux_df_player['Statut_Production'].unique().tolist(), key="player_filter_status")
+            st.selectbox("Filtrer par Genre", ['Tous'] + morceaux_df_player['ID_Style_Musical_Principal'].unique().tolist(), key="player_filter_genre")
+            st.selectbox("Filtrer par Artiste IA", ['Tous'] + morceaux_df_player['ID_Artiste_IA'].unique().tolist(), key="player_filter_artist")
+            st.selectbox("Filtrer par Statut", ['Tous'] + morceaux_df_player['Statut_Production'].unique().tolist(), key="player_filter_status")
 
         filtered_morceaux_player = morceaux_df_player.copy()
-        if filter_genre != 'Tous':
-            filtered_morceaux_player = filtered_morceaux_player[filtered_morceaux_player['ID_Style_Musical_Principal'] == filter_genre]
-        if filter_artist != 'Tous':
-            filtered_morceaux_player = filtered_morceaux_player[filtered_morceaux_player['ID_Artiste_IA'] == filter_artist]
-        if filter_status != 'Tous':
-            filtered_morceaux_player = filtered_morceaux_player[filtered_morceaux_player['Statut_Production'] == filter_status]
+        if st.session_state.player_filter_genre != 'Tous':
+            filtered_morceaux_player = filtered_morceaux_player[filtered_morceaux_player['ID_Style_Musical_Principal'] == st.session_state.player_filter_genre]
+        if st.session_state.player_filter_artist != 'Tous':
+            filtered_morceaux_player = filtered_morceaux_player[filtered_morceaux_player['ID_Artiste_IA'] == st.session_state.player_filter_artist]
+        if st.session_state.player_filter_status != 'Tous':
+            filtered_morceaux_player = filtered_morceaux_player[filtered_morceaux_player['Statut_Production'] == st.session_state.player_filter_status]
 
         with col_select_track:
             st.subheader("Sélection du Morceau")
@@ -1376,7 +1473,7 @@ def render_my_ia_artists_page():
         )
     _handle_generic_delete_confirmation(
         session_state_id_key='confirm_delete_artiste_id',
-        session_state_name_key='confirm_delete_artiste_name',
+        session_state_key='confirm_delete_artiste_name',
         sheet_name_key="ARTISTES_IA_COSMIQUES",
         unique_id_col='ID_Artiste_IA',
         delete_function=sc.delete_row_from_sheet
@@ -1503,9 +1600,9 @@ def render_strategic_directives_page():
 
     with st.form("strategic_directive_form"):
         st.subheader("Paramètres de la Directive")
-        objectif_artiste = st.text_area("Quel est votre objectif principal pour cet artiste/morceau/album ? (ex: 'Maximiser les écoutes sur les plateformes', 'Développer une communauté de fans')", key="directive_objectif", required=True)
-        nom_artiste_ia_directive = st.selectbox("Artiste IA concerné", [''] + artistes_ia_list, key="directive_artiste_ia", required=True)
-        genre_dominant_directive = st.selectbox("Genre dominant de l'artiste/projet", [''] + genres_musicaux_list, key="directive_genre_dominant", required=True)
+        st.text_area("Quel est votre objectif principal pour cet artiste/morceau/album ? (ex: 'Maximiser les écoutes sur les plateformes', 'Développer une communauté de fans')", key="directive_objectif") # Removed 'required=True'
+        st.selectbox("Artiste IA concerné", [''] + artistes_ia_list, key="directive_artiste_ia") # Removed 'required=True'
+        st.selectbox("Genre dominant de l'artiste/projet", [''] + genres_musicaux_list, key="directive_genre_dominant") # Removed 'required=True'
         
         st.info("Les données simulées peuvent influencer la directive. Effectuez une simulation de stats pour les morceaux pertinents avant de générer la directive.")
         st.text_area("Résumé des données et performances actuelles (optionnel, ex: '5k écoutes en 1 mois sur Spotify')", key="directive_donnees_resume")
@@ -1514,19 +1611,32 @@ def render_strategic_directives_page():
         submit_directive = st.form_submit_button("Obtenir la Directive Stratégique")
 
         if submit_directive:
-            if all([objectif_artiste, nom_artiste_ia_directive, genre_dominant_directive]):
+            # Manual validation
+            required_directive_fields = {
+                "directive_objectif": "Objectif Principal",
+                "directive_artiste_ia": "Artiste IA concerné",
+                "directive_genre_dominant": "Genre dominant de l'artiste/projet"
+            }
+
+            all_directive_fields_filled = True
+            for field_key, field_name in required_directive_fields.items():
+                if not st.session_state.get(field_key):
+                    st.warning(f"Veuillez remplir le champ obligatoire : {field_name}.")
+                    all_directive_fields_filled = False
+                    break
+
+            if all_directive_fields_filled:
                 with st.spinner("L'Oracle élabore une stratégie..."):
                     directive = go.generate_strategic_directive(
-                        objectif_strategique=objectif_artiste,
-                        nom_artiste_ia=nom_artiste_ia_directive,
-                        genre_dominant=genre_dominant_directive,
+                        objectif_strategique=st.session_state.directive_objectif,
+                        nom_artiste_ia=st.session_state.directive_artiste_ia,
+                        genre_dominant=st.session_state.directive_genre_dominant,
                         donnees_simulees_resume=st.session_state.directive_donnees_resume,
                         tendances_actuelles=st.session_state.directive_tendances_actuelles
                     )
                     st.session_state['strategic_directive'] = directive
                     st.success("Directive stratégique générée !")
-            else:
-                st.warning("Veuillez définir votre objectif, l'artiste IA et son genre dominant.")
+                # else: validation message is handled by the loop above
 
     if 'strategic_directive' in st.session_state and st.session_state.strategic_directive:
         st.markdown("---")
@@ -1545,17 +1655,17 @@ def render_viral_potential_niches_page():
         morceau_to_analyze_display = st.selectbox(
             "Sélectionnez le Morceau à Analyser",
             _get_options_for_selectbox(morceaux_all_viral, 'ID_Morceau', 'Titre_Morceau'),
-            key="viral_morceau_a_analyser",
-            required=True
+            key="viral_morceau_a_analyser" # Removed 'required=True'
         )
         morceau_to_analyze_id = _get_id_from_display_string(morceau_to_analyze_display)
 
-        st.selectbox("Public Cible Principal de ce morceau", [''] + public_cible_list, key="viral_public_cible", required=True)
+        st.selectbox("Public Cible Principal de ce morceau", [''] + public_cible_list, key="viral_public_cible") # Removed 'required=True'
         st.text_area("Tendances actuelles du marché général à considérer (ex: 'Popularité croissante des vidéos courtes sur TikTok')", key="viral_current_trends")
         
         submit_viral_analysis = st.form_submit_button("Analyser le Potentiel Viral")
 
         if submit_viral_analysis:
+            # Manual validation
             if morceau_to_analyze_id and st.session_state.viral_public_cible:
                 selected_morceau_data = morceaux_all_viral[morceaux_all_viral['ID_Morceau'] == morceau_to_analyze_id].iloc[0].to_dict()
                 with st.spinner("L'Oracle analyse le potentiel viral..."):
@@ -2210,8 +2320,6 @@ page_render_functions = {
     'Outils IA Référencés': render_ai_tools_referenced_page,
     'Timeline Événements': render_cultural_events_timeline_page,
     "Historique de l'Oracle": render_oracle_history_page,
-    # Page cachée pour le Lecteur Audio (accessible via un lien interne ou une page "Mes Morceaux" plus tard)
-    # ou accessible via un bouton dédié dans le menu si souhaité
     'Lecteur Audios': render_audio_player_page
 }
 
@@ -2220,4 +2328,3 @@ if st.session_state['current_page'] in page_render_functions:
     page_render_functions[st.session_state['current_page']]()
 else:
     st.error("Page non trouvée.")
-
